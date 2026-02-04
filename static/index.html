@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#2563eb">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="default">
+    <meta name="apple-mobile-web-app-title" content="Tasks">
+    <title>Task Manager</title>
+    <link rel="manifest" href="/manifest.json">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect fill='%232563eb' width='100' height='100' rx='20'/><path fill='white' d='M25 50 L40 65 L75 30' stroke='white' stroke-width='8' fill='none'/></svg>">
+    <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="header-left">
+                <h1>Task Manager</h1>
+                <button id="btn-dark-mode" class="btn-icon" title="Toggle dark mode">
+                    <svg id="icon-sun" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="12" cy="12" r="5"/>
+                        <line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/>
+                        <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
+                        <line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/>
+                        <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+                    </svg>
+                    <svg id="icon-moon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="hidden">
+                        <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+                    </svg>
+                </button>
+            </div>
+            <div class="header-actions">
+                <button id="btn-new-task" class="btn btn-primary">+ New Task</button>
+                <button id="btn-new-topic" class="btn btn-secondary">+ Open Topic</button>
+            </div>
+        </header>
+
+        <!-- Filters -->
+        <div class="filters">
+            <div class="filter-group">
+                <label>Status:</label>
+                <select id="filter-status">
+                    <option value="all">All</option>
+                    <option value="created">Created</option>
+                    <option value="active">Active</option>
+                    <option value="closed">Closed</option>
+                </select>
+            </div>
+            <div class="filter-group">
+                <label>Sort:</label>
+                <select id="sort-by">
+                    <option value="date-desc">Newest First</option>
+                    <option value="date-asc">Oldest First</option>
+                    <option value="priority">Priority</option>
+                </select>
+            </div>
+        </div>
+
+        <!-- Task List -->
+        <div id="task-list" class="task-list">
+            <!-- Tasks will be rendered here -->
+        </div>
+
+        <!-- New Task Modal -->
+        <div id="modal-task" class="modal hidden">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h2>New Task</h2>
+                    <button class="btn-close" data-close="modal-task">&times;</button>
+                </div>
+                <form id="form-task">
+                    <input type="hidden" id="task-id" value="">
+                    <div class="form-group">
+                        <label for="task-description">Description</label>
+                        <textarea id="task-description" rows="3" required placeholder="Task description..."></textarea>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="task-status">Status</label>
+                            <select id="task-status">
+                                <option value="created">Created</option>
+                                <option value="active">Active</option>
+                                <option value="closed">Closed</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label for="task-priority">Priority</label>
+                            <select id="task-priority">
+                                <option value="urgent">Urgent</option>
+                                <option value="normal" selected>Normal</option>
+                                <option value="low">Low</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="form-actions">
+                        <button type="button" class="btn btn-secondary" data-close="modal-task">Cancel</button>
+                        <button type="submit" class="btn btn-primary">Save Task</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- New Topic Modal -->
+        <div id="modal-topic" class="modal hidden">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h2>Create Open Topic</h2>
+                    <button class="btn-close" data-close="modal-topic">&times;</button>
+                </div>
+                <form id="form-topic">
+                    <div class="form-group">
+                        <label for="topic-name">Topic Name (filename)</label>
+                        <div class="input-prefix">
+                            <span id="topic-date-prefix"></span>
+                            <input type="text" id="topic-name" required placeholder="topic_name">
+                            <span>.md</span>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label for="topic-content">Initial Content (optional)</label>
+                        <textarea id="topic-content" rows="5" placeholder="Initial notes..."></textarea>
+                    </div>
+                    <div class="form-actions">
+                        <button type="button" class="btn btn-secondary" data-close="modal-topic">Cancel</button>
+                        <button type="submit" class="btn btn-primary">Create Topic</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- Topics Section (collapsible) -->
+        <details class="topics-section">
+            <summary>Open Topics</summary>
+            <div id="topic-list" class="topic-list">
+                <!-- Topics will be rendered here -->
+            </div>
+        </details>
+    </div>
+
+    <script src="/app.js"></script>
+</body>
+</html>

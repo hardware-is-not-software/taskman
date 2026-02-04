@@ -1,0 +1,9 @@
+{
+    "name": "Task Manager",
+    "short_name": "Tasks",
+    "description": "Simple task manager for WORKITEMS",
+    "start_url": "/",
+    "display": "standalone",
+    "background_color": "#f9fafb",
+    "theme_color": "#2563eb"
+}

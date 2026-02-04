@@ -1,0 +1,65 @@
+# Task Manager App - Git Ignore
+# Keep the app code, ignore all personal/work data
+
+# ===================
+# CONFIDENTIAL DATA - Never commit these
+# ===================
+
+# Task data folders (contain work items)
+tasks/
+open/
+closed/
+completed/
+progress in control/
+
+# Any markdown files in root (might contain notes) - except README
+/*.md
+!README.md
+
+# Environment and secrets
+.env
+.env.*
+*.pem
+*.key
+credentials.*
+secrets.*
+
+# ===================
+# Standard ignores
+# ===================
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+ENV/
+.venv/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+logs/
+
+# ===================
+# Keep these (app files)
+# ===================
+# server.py - main app
+# static/ - frontend files
+# requirements.txt - dependencies
+# .gitignore - this file
+# README.md - will create

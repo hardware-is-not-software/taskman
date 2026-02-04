@@ -1,0 +1,2 @@
+# Task Manager Dependencies
+flask>=2.0
