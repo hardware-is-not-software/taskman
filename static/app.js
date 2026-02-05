@@ -269,15 +269,13 @@ function renderTopics() {
     `).join('');
 }
 
-// Open task modal (for new tasks only now)
+// Open task modal (for new tasks only)
 function openTaskModal() {
-    const title = document.getElementById('modal-task-title');
     const idField = document.getElementById('task-id');
     const descField = document.getElementById('task-description');
     const statusField = document.getElementById('task-status');
     const priorityField = document.getElementById('task-priority');
     
-    title.textContent = 'New Task';
     idField.value = '';
     descField.value = '';
     statusField.value = 'created';
