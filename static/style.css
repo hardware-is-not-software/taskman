@@ -49,6 +49,10 @@
     padding: 0;
 }
 
+.hidden {
+    display: none !important;
+}
+
 body {
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
     background: var(--bg);
@@ -301,6 +305,7 @@ header h1 {
 
 .header-actions {
     display: flex;
+    align-items: center;
     gap: 0.5rem;
 }
 
@@ -851,12 +856,40 @@ select:focus {
     max-width: 700px;
 }
 
+.modal-content-small {
+    max-width: 430px;
+}
+
 .modal-header {
     display: flex;
     justify-content: space-between;
     align-items: center;
     padding: 1rem;
     border-bottom: 1px solid var(--border);
+}
+
+.mcp-dialog-body {
+    padding: 1rem;
+}
+
+.mcp-dialog-json {
+    margin: 0;
+    padding: 0.55rem;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text);
+    font-size: 0.72rem;
+    line-height: 1.3;
+    max-height: 220px;
+    overflow: auto;
+}
+
+.mcp-dialog-status {
+    min-height: 1rem;
+    margin: 0.45rem 0 0;
+    font-size: 0.78rem;
+    color: var(--text-muted);
 }
 
 .modal-header h2 {

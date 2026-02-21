@@ -39,6 +39,11 @@ const storageToggleBtn = document.getElementById('btn-storage-toggle');
 const taskCategoriesSelect = document.getElementById('task-categories');
 const modalCategories = document.getElementById('modal-categories');
 const categoryManageList = document.getElementById('category-manage-list');
+const mcpBtn = document.getElementById('btn-mcp');
+const modalMcp = document.getElementById('modal-mcp');
+const mcpDialogJson = document.getElementById('mcp-dialog-json');
+const mcpDialogStatus = document.getElementById('mcp-dialog-status');
+const mcpCopyBtn = document.getElementById('btn-mcp-copy');
 
 // Modals
 const modalTask = document.getElementById('modal-task');
@@ -109,6 +114,12 @@ function setupEventListeners() {
     document.getElementById('btn-new-task').addEventListener('click', () => {
         openTaskModal();
     });
+    if (mcpBtn) {
+        mcpBtn.addEventListener('click', openMcpDialog);
+    }
+    if (mcpCopyBtn) {
+        mcpCopyBtn.addEventListener('click', copyMcpDialogConfig);
+    }
     
     // New topic button
     document.getElementById('btn-new-topic').addEventListener('click', () => {
@@ -129,7 +140,8 @@ function setupEventListeners() {
     });
     
     // Close modal on backdrop click
-    [modalTask, modalTopic, modalTopicEdit, modalCategories].forEach(modal => {
+    [modalTask, modalTopic, modalTopicEdit, modalCategories, modalMcp].forEach(modal => {
+        if (!modal) return;
         modal.addEventListener('click', (e) => {
             if (e.target === modal) {
                 modal.classList.add('hidden');
@@ -213,8 +225,8 @@ async function openNativePicker(targetInputId, mode) {
     if (!input) return;
     let initialPath = (input.value || '').trim();
     if (!initialPath && targetInputId === 'topic-path' && storageConfig?.topics_dir) {
-        const topicName = (document.getElementById('topic-name')?.value || 'topic').trim() || 'topic';
-        const safeName = topicName.replace(/[^\w\-]/g, '_');
+        const noteName = (document.getElementById('topic-name')?.value || 'note').trim() || 'note';
+        const safeName = noteName.replace(/[^\w\-]/g, '_');
         const now = new Date();
         const suggested = `${now.getFullYear()}_${now.getMonth() + 1}_${now.getDate()}_${safeName}.md`;
         initialPath = `${storageConfig.topics_dir}/${suggested}`;
@@ -261,6 +273,65 @@ function setStorageMessage(text, type = '') {
     storageMessage.classList.remove('success', 'error');
     if (type) {
         storageMessage.classList.add(type);
+    }
+}
+
+async function openMcpDialog() {
+    if (!modalMcp || !mcpDialogJson || !mcpDialogStatus || !mcpCopyBtn) return;
+    mcpDialogJson.textContent = 'Loading...';
+    mcpDialogStatus.textContent = '';
+    mcpCopyBtn.disabled = true;
+    modalMcp.classList.remove('hidden');
+    try {
+        const response = await fetch('/api/mcp-config');
+        if (!response.ok) {
+            throw new Error('Failed to load MCP config');
+        }
+        const config = await response.json();
+        mcpDialogJson.textContent = JSON.stringify(config, null, 2);
+        mcpCopyBtn.disabled = false;
+    } catch (error) {
+        console.error('Failed to load MCP config:', error);
+        const fallbackConfig = {
+            mcpServers: {
+                'taskman-mcp': {
+                    url: `${window.location.origin}/mcp`
+                }
+            }
+        };
+        mcpDialogJson.textContent = JSON.stringify(fallbackConfig, null, 2);
+        mcpDialogStatus.textContent = 'Using fallback config';
+        mcpCopyBtn.disabled = false;
+    }
+}
+
+async function copyText(text) {
+    if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+        return;
+    }
+    const input = document.createElement('textarea');
+    input.value = text;
+    input.setAttribute('readonly', '');
+    input.style.position = 'fixed';
+    input.style.opacity = '0';
+    document.body.appendChild(input);
+    input.select();
+    const success = document.execCommand('copy');
+    document.body.removeChild(input);
+    if (!success) {
+        throw new Error('Legacy copy failed');
+    }
+}
+
+async function copyMcpDialogConfig() {
+    if (!mcpDialogJson || !mcpDialogStatus) return;
+    try {
+        await copyText(mcpDialogJson.textContent || '{}');
+        mcpDialogStatus.textContent = 'Copied to clipboard';
+    } catch (error) {
+        console.error('Failed to copy MCP config:', error);
+        mcpDialogStatus.textContent = 'Copy failed';
     }
 }
 
@@ -386,7 +457,7 @@ async function handleSnapshotAction(e) {
         promptText = 'Revert tasks file to this snapshot?';
     } else if (action === 'full') {
         mode = 'full';
-        promptText = 'Run full recovery? This restores both tasks and open topics from the snapshot.';
+        promptText = 'Run full recovery? This restores both tasks and notes from the snapshot.';
     } else {
         return;
     }
@@ -450,7 +521,7 @@ async function loadTopics() {
         topics = await response.json();
         renderTopics();
     } catch (error) {
-        console.error('Failed to load topics:', error);
+        console.error('Failed to load notes:', error);
     }
 }
 
@@ -552,7 +623,7 @@ function renderTasks() {
                         </svg>
                     </button>
                 ` : ''}
-                <button onclick="createTopicFromTask(${task.id})" aria-label="Create Open Topic" data-tooltip="Create Open Topic">
+                <button onclick="createTopicFromTask(${task.id})" aria-label="Create Note" data-tooltip="Create Note">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
                         <polyline points="14 2 14 8 20 8"/>
@@ -598,7 +669,7 @@ function renderTaskCategorySelect() {
 // Render topics
 function renderTopics() {
     if (topics.length === 0) {
-        topicList.innerHTML = '<div class="empty-state">No open topics</div>';
+        topicList.innerHTML = '<div class="empty-state">No notes</div>';
         return;
     }
     
@@ -830,11 +901,11 @@ async function handleTopicSubmit(e) {
             await loadTopics();
         } else {
             const error = await response.json();
-            alert(error.error || 'Failed to create topic');
+            alert(error.error || 'Failed to create note');
         }
     } catch (error) {
-        console.error('Failed to create topic:', error);
-        alert('Failed to create topic');
+        console.error('Failed to create note:', error);
+        alert('Failed to create note');
     }
 }
 
@@ -843,7 +914,7 @@ async function openTopicEditor(filename) {
         const response = await fetch(`/api/topics/${encodeURIComponent(filename)}`);
         if (!response.ok) {
             const error = await response.json();
-            throw new Error(error.error || 'Failed to load topic');
+            throw new Error(error.error || 'Failed to load note');
         }
         const topic = await response.json();
         setTopicEditMode(true);
@@ -853,8 +924,8 @@ async function openTopicEditor(filename) {
         modalTopicEdit.classList.remove('hidden');
         document.getElementById('topic-edit-content').focus();
     } catch (error) {
-        console.error('Failed to open topic editor:', error);
-        alert(error.message || 'Failed to open topic');
+        console.error('Failed to open note editor:', error);
+        alert(error.message || 'Failed to open note');
     }
 }
 
@@ -863,7 +934,7 @@ async function openTopicViewer(filename) {
         const response = await fetch(`/api/topics/${encodeURIComponent(filename)}`);
         if (!response.ok) {
             const error = await response.json();
-            throw new Error(error.error || 'Failed to load topic');
+            throw new Error(error.error || 'Failed to load note');
         }
         const topic = await response.json();
         setTopicEditMode(false);
@@ -872,8 +943,8 @@ async function openTopicViewer(filename) {
         document.getElementById('topic-edit-content').value = topic.content || '';
         modalTopicEdit.classList.remove('hidden');
     } catch (error) {
-        console.error('Failed to open topic viewer:', error);
-        alert(error.message || 'Failed to open topic');
+        console.error('Failed to open note viewer:', error);
+        alert(error.message || 'Failed to open note');
     }
 }
 
@@ -896,11 +967,11 @@ async function handleTopicEditSubmit(e) {
             await loadTopics();
         } else {
             const error = await response.json();
-            alert(error.error || 'Failed to save topic');
+            alert(error.error || 'Failed to save note');
         }
     } catch (error) {
-        console.error('Failed to save topic:', error);
-        alert('Failed to save topic');
+        console.error('Failed to save note:', error);
+        alert('Failed to save note');
     }
 }
 
@@ -908,7 +979,7 @@ function setTopicEditMode(isEditable) {
     const title = document.getElementById('topic-edit-modal-title');
     const textarea = document.getElementById('topic-edit-content');
     const saveBtn = document.getElementById('btn-topic-save');
-    title.textContent = isEditable ? 'Edit Topic' : 'View Topic';
+    title.textContent = isEditable ? 'Edit Note' : 'View Note';
     textarea.readOnly = !isEditable;
     saveBtn.style.display = isEditable ? 'inline-flex' : 'none';
 }

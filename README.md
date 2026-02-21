@@ -13,12 +13,12 @@ A lightweight task manager PWA built with Python/Flask and vanilla JavaScript.
   - Sort by Newest, Oldest, Priority, Status, or Category
   - Status sort order: Due, Active, Created, Closed, Deleted
   - Category sort: A-Z, then status order within each category
-- **Open Topics**: Create detailed topic files from tasks
+- **Notes**: Create detailed note files from tasks
 - **Category Management**: Add, rename, and delete categories (default is protected)
 - **Storage Panel**: Configure local live file paths and recovery destination
 - **Path Browser**: Browse and pick file/folder locations directly from the storage panel
-- **Automatic Cloud Sync Snapshots**: Auto-create protection snapshots before task/topic changes and write them to your configured synced folder
-- **Snapshots & Recovery**: Create snapshots and restore with task-only revert or full recovery
+- **Automatic Cloud Sync Snapshots**: Auto-create protection snapshots before task/note changes and write them to your configured synced folder
+- **Snapshots & Recovery**: Create snapshots and restore with task-only revert or full recovery (includes backup of `storage_config.json` and `categories.json`; restored in full recovery)
 - **Dark Mode**: Toggle between light and dark themes
 - **PWA Support**: Install as a standalone app on macOS/Windows
 - **Fast Tooltips**: Immediate hover/focus tooltips for action buttons
@@ -37,6 +37,30 @@ python server.py
 # http://localhost:5050
 ```
 
+## MCP Server (for Cursor/Codex)
+
+MCP is served by the same web server process.
+
+```bash
+python server.py
+```
+
+Exposed MCP tools are intentionally restricted to task-safe operations only:
+
+- `taskman.list_tasks` (read tasks)
+- `taskman.create_task` (create task)
+- `taskman.set_task_status` (change task status)
+
+Not exposed via MCP:
+
+- storage configuration changes
+- file/note deletion flows
+- snapshot restore/storage mutation endpoints
+
+Connection details are available at `/api/mcp-config`, and MCP JSON-RPC requests are handled at `/mcp`.
+When the web server starts, the MCP config is printed to console and appended to `server.log`.
+The GUI includes an `MCP` button that opens a dialog with copy-ready config JSON.
+
 ## Data Format
 
 Tasks are stored in `tasks/runnning.md` in a human-readable format:
@@ -53,7 +77,7 @@ Example:
 
 Storage locations are configurable in the app:
 
-- **Live files**: local paths for task and topic files
+- **Live files**: local paths for task and note files
 - **Recovery snapshots**: folder path for snapshot storage (can be a OneDrive, SharePoint sync folder, or iCloud Drive folder)
 - **Auto protection**: optional auto snapshots before changes, with configurable interval and retention count
 
@@ -71,7 +95,7 @@ Storage locations are configurable in the app:
 │   ├── offline.html    # Offline fallback page
 │   └── icons/          # PWA icons
 ├── tasks/              # Task data (not in repo)
-└── topics/             # Topic files (not in repo)
+└── topics/             # Note files (not in repo)
 ```
 
 ## Usage

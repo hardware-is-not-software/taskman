@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Task Manager - Flask API Server
-Manages tasks in markdown and topic files with configurable storage and snapshots.
+Manages tasks in markdown and note files with configurable storage and snapshots.
 """
 
 from flask import Flask, jsonify, request, send_from_directory
@@ -23,9 +23,14 @@ DEFAULT_RECOVERY_DIR = os.path.join(BASE_DIR, 'recovery')
 STORAGE_CONFIG_FILE = os.path.join(BASE_DIR, 'storage_config.json')
 LEGACY_STORAGE_CONFIG_FILE = os.path.join(BASE_DIR, 'tasks', 'storage_config.json')
 CATEGORIES_FILE = os.path.join(BASE_DIR, 'categories.json')
+STARTUP_LOG_FILE = os.path.join(BASE_DIR, 'server.log')
 DEFAULT_CATEGORY = 'default'
 ALLOWED_PROVIDERS = {'local', 'onedrive', 'sharepoint', 'icloud'}
 SNAPSHOT_NAME_PATTERN = re.compile(r'^[A-Za-z0-9_-]+$')
+MCP_PROTOCOL_VERSION = '2024-11-05'
+MCP_SERVER_NAME = 'taskman-mcp'
+MCP_SERVER_VERSION = '1.0.0'
+STATUS_OPTIONS = ['created', 'active', 'due', 'closed', 'deleted']
 
 # Task format regex: (status|priority|date|due|categories) description
 TASK_PATTERN = re.compile(r'^\(([^)]+)\)\s+(.+)$')
@@ -246,6 +251,13 @@ def load_categories():
     return categories
 
 
+def get_default_category(category_list):
+    for category in category_list:
+        if category.lower() == DEFAULT_CATEGORY:
+            return category
+    return DEFAULT_CATEGORY
+
+
 def normalize_task_categories(value, allowed_categories=None):
     normalized = normalize_category_list(value)
     if not allowed_categories:
@@ -396,6 +408,218 @@ def is_date(value):
     return bool(re.match(r'^\d{4}-\d{2}-\d{2}$', value))
 
 
+def mcp_server_config(web_url='http://localhost:5050'):
+    return {
+        'mcpServers': {
+            MCP_SERVER_NAME: {
+                'url': f"{web_url.rstrip('/')}/mcp"
+            }
+        }
+    }
+
+
+def write_startup_log(web_url, config):
+    timestamp = datetime.now().isoformat(timespec='seconds')
+    mcp_config = mcp_server_config(web_url)
+    lines = [
+        f"[{timestamp}] Task Manager running at {web_url}",
+        f"Tasks file: {config['tasks_file']}",
+        f"Notes: {config['topics_dir']}",
+        f"Recovery snapshots: {snapshot_root(config)}",
+        f"MCP server config: {json.dumps(mcp_config, ensure_ascii=True)}",
+        ""
+    ]
+    try:
+        with open(STARTUP_LOG_FILE, 'a', encoding='utf-8') as f:
+            f.write('\n'.join(lines))
+    except OSError:
+        # Logging should never block server startup.
+        pass
+
+
+def build_mcp_tool_response(payload):
+    return {
+        'content': [{
+            'type': 'text',
+            'text': json.dumps(payload, ensure_ascii=True, indent=2)
+        }]
+    }
+
+
+def mcp_tools():
+    return [
+        {
+            'name': 'taskman.list_tasks',
+            'description': 'List tasks with optional status/category filters.',
+            'inputSchema': {
+                'type': 'object',
+                'properties': {
+                    'status': {'type': 'string'},
+                    'category': {'type': 'string'},
+                    'limit': {'type': 'integer', 'minimum': 1, 'maximum': 500}
+                }
+            }
+        },
+        {
+            'name': 'taskman.create_task',
+            'description': 'Create a new task.',
+            'inputSchema': {
+                'type': 'object',
+                'required': ['description'],
+                'properties': {
+                    'description': {'type': 'string'},
+                    'status': {'type': 'string', 'enum': ['created', 'active', 'due', 'closed', 'deleted']},
+                    'priority': {'type': 'string', 'enum': ['urgent', 'normal', 'low']},
+                    'due_date': {'type': 'string', 'description': 'YYYY-MM-DD'},
+                    'category': {'type': 'string'}
+                }
+            }
+        },
+        {
+            'name': 'taskman.set_task_status',
+            'description': 'Update status for an existing task.',
+            'inputSchema': {
+                'type': 'object',
+                'required': ['task_id', 'status'],
+                'properties': {
+                    'task_id': {'type': 'integer'},
+                    'status': {'type': 'string', 'enum': ['created', 'active', 'due', 'closed', 'deleted']}
+                }
+            }
+        }
+    ]
+
+
+def mcp_list_tasks(arguments):
+    tasks = parse_tasks()
+    status = (arguments.get('status') or '').strip().lower()
+    category = normalize_category_name(arguments.get('category'))
+    limit = normalize_int(arguments.get('limit'), 200, minimum=1, maximum=500)
+
+    if status:
+        tasks = [t for t in tasks if (t.get('status') or '').lower() == status]
+    if category:
+        wanted = category.lower()
+        tasks = [
+            t for t in tasks
+            if any(normalize_category_name(cat).lower() == wanted for cat in (t.get('categories') or []))
+        ]
+    tasks = tasks[:limit]
+    return build_mcp_tool_response({'tasks': tasks, 'count': len(tasks)})
+
+
+def mcp_create_task(arguments):
+    description = (arguments.get('description') or '').strip()
+    if not description:
+        raise ValueError('description is required')
+
+    status = (arguments.get('status') or 'created').strip().lower()
+    if status not in STATUS_OPTIONS:
+        raise ValueError(f'Invalid status: {status}')
+
+    priority = (arguments.get('priority') or 'normal').strip().lower()
+    if priority not in {'urgent', 'normal', 'low'}:
+        raise ValueError(f'Invalid priority: {priority}')
+
+    due_date = arguments.get('due_date')
+    if due_date:
+        due_date = due_date.strip()
+        if not is_date(due_date):
+            raise ValueError('due_date must use YYYY-MM-DD')
+
+    categories = load_categories()
+    chosen_category = normalize_category_name(arguments.get('category')) or get_default_category(categories)
+    if chosen_category.lower() not in {c.lower() for c in categories}:
+        categories.append(chosen_category)
+        categories = save_categories(categories)
+
+    tasks = parse_tasks()
+
+    new_task = {
+        'id': max([t['id'] for t in tasks], default=-1) + 1,
+        'status': status,
+        'priority': priority,
+        'date': datetime.now().strftime('%Y-%m-%d'),
+        'due_date': due_date,
+        'description': description,
+        'categories': normalize_task_categories([chosen_category], categories)
+    }
+    tasks.append(new_task)
+    save_tasks(tasks)
+    return build_mcp_tool_response({'task': new_task})
+
+
+def mcp_set_task_status(arguments):
+    task_id = arguments.get('task_id')
+    if not isinstance(task_id, int):
+        raise ValueError('task_id must be an integer')
+
+    status = (arguments.get('status') or '').strip().lower()
+    if status not in STATUS_OPTIONS:
+        raise ValueError(f'Invalid status: {status}')
+
+    tasks = parse_tasks()
+    target = next((t for t in tasks if t.get('id') == task_id), None)
+    if target is None:
+        raise ValueError('task not found')
+
+    target['status'] = status
+    save_tasks(tasks)
+    return build_mcp_tool_response({'task': target})
+
+
+def handle_mcp_request(payload):
+    method = payload.get('method')
+    request_id = payload.get('id')
+    params = payload.get('params') or {}
+
+    def ok(result):
+        if request_id is None:
+            return None
+        return {'jsonrpc': '2.0', 'id': request_id, 'result': result}
+
+    def err(code, message):
+        if request_id is None:
+            return None
+        return {'jsonrpc': '2.0', 'id': request_id, 'error': {'code': code, 'message': message}}
+
+    if method == 'initialize':
+        return ok({
+            'protocolVersion': MCP_PROTOCOL_VERSION,
+            'capabilities': {'tools': {}},
+            'serverInfo': {'name': MCP_SERVER_NAME, 'version': MCP_SERVER_VERSION}
+        })
+
+    if method == 'notifications/initialized':
+        return None
+
+    if method == 'ping':
+        return ok({})
+
+    if method == 'tools/list':
+        return ok({'tools': mcp_tools()})
+
+    if method == 'tools/call':
+        name = params.get('name')
+        arguments = params.get('arguments') or {}
+        try:
+            if name == 'taskman.list_tasks':
+                return ok(mcp_list_tasks(arguments))
+            if name == 'taskman.create_task':
+                return ok(mcp_create_task(arguments))
+            if name == 'taskman.set_task_status':
+                return ok(mcp_set_task_status(arguments))
+            return err(-32601, f'Unknown tool: {name}')
+        except (ValueError, RuntimeError) as exc:
+            return err(-32000, str(exc))
+
+    return err(-32601, f'Method not found: {method}')
+
+
+def current_web_url():
+    return request.host_url.rstrip('/')
+
+
 def resolve_topic_path(filename, topics_dir):
     base = os.path.abspath(topics_dir)
     candidate = os.path.abspath(os.path.join(base, filename))
@@ -404,7 +628,7 @@ def resolve_topic_path(filename, topics_dir):
     except ValueError:
         in_base = False
     if not in_base:
-        raise ValueError('Invalid topic path')
+        raise ValueError('Invalid note path')
     return candidate
 
 
@@ -602,6 +826,10 @@ def write_snapshot(snapshot_id, mode='manual', trigger='manual'):
 
     if os.path.exists(tasks_file):
         shutil.copy2(tasks_file, os.path.join(snapshot_dir, 'runnning.md'))
+    if os.path.exists(STORAGE_CONFIG_FILE):
+        shutil.copy2(STORAGE_CONFIG_FILE, os.path.join(snapshot_dir, 'storage_config.json'))
+    if os.path.exists(CATEGORIES_FILE):
+        shutil.copy2(CATEGORIES_FILE, os.path.join(snapshot_dir, 'categories.json'))
 
     topics_snapshot_dir = os.path.join(snapshot_dir, 'open')
     if os.path.isdir(topics_dir):
@@ -618,6 +846,8 @@ def write_snapshot(snapshot_id, mode='manual', trigger='manual'):
         'recovery_dir': config['recovery_dir'],
         'tasks_file': tasks_file,
         'topics_dir': topics_dir,
+        'includes_storage_config': os.path.exists(STORAGE_CONFIG_FILE),
+        'includes_categories': os.path.exists(CATEGORIES_FILE),
     }
     with open(os.path.join(snapshot_dir, 'metadata.json'), 'w', encoding='utf-8') as f:
         json.dump(metadata, f, indent=2)
@@ -690,6 +920,8 @@ def restore_snapshot(snapshot_id, mode):
 
     source_tasks = os.path.join(snapshot_dir, 'runnning.md')
     source_topics = os.path.join(snapshot_dir, 'open')
+    source_storage_config = os.path.join(snapshot_dir, 'storage_config.json')
+    source_categories = os.path.join(snapshot_dir, 'categories.json')
 
     if os.path.exists(source_tasks):
         os.makedirs(os.path.dirname(config['tasks_file']), exist_ok=True)
@@ -703,6 +935,10 @@ def restore_snapshot(snapshot_id, mode):
             shutil.copytree(source_topics, config['topics_dir'])
         else:
             os.makedirs(config['topics_dir'], exist_ok=True)
+        if os.path.exists(source_storage_config):
+            shutil.copy2(source_storage_config, STORAGE_CONFIG_FILE)
+        if os.path.exists(source_categories):
+            shutil.copy2(source_categories, CATEGORIES_FILE)
 
 
 # Serve index.html at root
@@ -826,6 +1062,27 @@ def get_categories():
     tasks = parse_tasks()
     categories = sync_categories_from_tasks(tasks)
     return jsonify(categories)
+
+
+@app.route('/api/mcp-config', methods=['GET'])
+def get_mcp_config():
+    return jsonify(mcp_server_config(current_web_url()))
+
+
+@app.route('/mcp', methods=['POST'])
+def mcp_http():
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({
+            'jsonrpc': '2.0',
+            'id': None,
+            'error': {'code': -32700, 'message': 'Invalid JSON-RPC payload'}
+        }), 400
+
+    response = handle_mcp_request(payload)
+    if response is None:
+        return '', 204
+    return jsonify(response)
 
 
 @app.route('/api/categories', methods=['POST'])
@@ -970,7 +1227,7 @@ def delete_task(task_id):
     return jsonify(target_task)
 
 
-# API: Get open topics
+# API: Get notes
 @app.route('/api/topics', methods=['GET'])
 def get_topics():
     config = load_storage_config()
@@ -1001,7 +1258,7 @@ def get_topics():
     return jsonify(topics)
 
 
-# API: Create open topic
+# API: Create open note
 @app.route('/api/topics', methods=['POST'])
 def create_topic():
     data = request.json or {}
@@ -1027,7 +1284,7 @@ def create_topic():
         except ValueError:
             same_root = False
         if not same_root:
-            return jsonify({'error': 'Topic file must be inside the configured topics folder'}), 400
+            return jsonify({'error': 'Note file must be inside the configured notes folder'}), 400
         filepath = requested_abs
         if not filepath.lower().endswith('.md'):
             filepath = f"{filepath}.md"
@@ -1040,7 +1297,7 @@ def create_topic():
 
     # Check if file already exists
     if os.path.exists(filepath):
-        return jsonify({'error': 'Topic with this name already exists'}), 409
+        return jsonify({'error': 'Note with this name already exists'}), 409
 
     # Create the file
     os.makedirs(os.path.dirname(filepath), exist_ok=True)
@@ -1055,7 +1312,7 @@ def create_topic():
     }), 201
 
 
-# API: Get topic content
+# API: Get note content
 @app.route('/api/topics/<path:filename>', methods=['GET', 'PUT'])
 def get_topic_content(filename):
     config = load_storage_config()
@@ -1065,7 +1322,7 @@ def get_topic_content(filename):
         return jsonify({'error': str(exc)}), 400
 
     if not os.path.exists(filepath):
-        return jsonify({'error': 'Topic not found'}), 404
+        return jsonify({'error': 'Note not found'}), 404
 
     if request.method == 'PUT':
         data = request.json or {}
@@ -1074,7 +1331,7 @@ def get_topic_content(filename):
             with open(filepath, 'w', encoding='utf-8') as f:
                 f.write(content)
         except OSError as exc:
-            return jsonify({'error': f'Failed to save topic: {exc}'}), 500
+            return jsonify({'error': f'Failed to save note: {exc}'}), 500
         return jsonify({'success': True, 'filename': filename})
 
     with open(filepath, 'r', encoding='utf-8') as f:
@@ -1084,9 +1341,12 @@ def get_topic_content(filename):
 
 
 if __name__ == '__main__':
+    web_url = 'http://localhost:5050'
     config = load_storage_config()
-    print("Task Manager running at http://localhost:5050")
+    print(f"Task Manager running at {web_url}")
     print(f"Tasks file: {config['tasks_file']}")
-    print(f"Open topics: {config['topics_dir']}")
+    print(f"Notes: {config['topics_dir']}")
     print(f"Recovery snapshots: {snapshot_root(config)}")
+    print(f"MCP server config: {json.dumps(mcp_server_config(web_url), ensure_ascii=True)}")
+    write_startup_log(web_url, config)
     app.run(host='0.0.0.0', port=5050, debug=True)

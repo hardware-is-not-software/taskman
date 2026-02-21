@@ -34,7 +34,7 @@
                         </div>
                     </div>
                     <div class="form-group">
-                        <label for="storage-topics-dir">Open topics folder (local live files)</label>
+                        <label for="storage-topics-dir">Notes folder (local live files)</label>
                         <div class="path-input-row">
                             <input type="text" id="storage-topics-dir" required>
                             <button type="button" class="btn btn-secondary btn-small btn-native-picker" data-native-target="storage-topics-dir" data-native-mode="dir">System…</button>
@@ -79,7 +79,7 @@
                         <h3>Snapshots</h3>
                         <button id="btn-create-snapshot" type="button" class="btn btn-secondary btn-small">Create Snapshot</button>
                     </div>
-                    <p class="storage-help">Use "Revert Tasks" for quick rollback, or "Full Recovery" to restore tasks and topics.</p>
+                    <p class="storage-help">Use "Revert Tasks" for quick rollback, or "Full Recovery" to restore tasks and notes.</p>
                     <div id="snapshot-list" class="snapshot-list"></div>
                 </div>
             </div>
@@ -102,8 +102,9 @@
                     </button>
                 </div>
                 <div class="header-actions">
+                    <button id="btn-mcp" class="btn btn-secondary" data-tooltip="Copy MCP config JSON" aria-label="Copy MCP config JSON">MCP</button>
                     <button id="btn-new-task" class="btn btn-primary">+ New Task</button>
-                    <button id="btn-new-topic" class="btn btn-secondary">+ Open Topic</button>
+                    <button id="btn-new-topic" class="btn btn-secondary">+ New Note</button>
                 </div>
             </header>
 
@@ -183,26 +184,26 @@
                 </div>
             </div>
 
-            <!-- New Topic Modal -->
+            <!-- New Note Modal -->
             <div id="modal-topic" class="modal hidden">
                 <div class="modal-content">
                     <div class="modal-header">
-                        <h2>Create Open Topic</h2>
+                        <h2>Create Note</h2>
                         <button class="btn-close" data-close="modal-topic">&times;</button>
                     </div>
                     <form id="form-topic">
                         <div class="form-group">
-                            <label for="topic-path">Topic File Path (optional)</label>
+                            <label for="topic-path">Note File Path (optional)</label>
                             <div class="path-input-row">
-                                <input type="text" id="topic-path" placeholder="Auto-generated in topics folder if empty">
+                                <input type="text" id="topic-path" placeholder="Auto-generated in notes folder if empty">
                                 <button type="button" class="btn btn-secondary btn-small btn-native-picker" data-native-target="topic-path" data-native-mode="save_file">System…</button>
                             </div>
                         </div>
                         <div class="form-group">
-                            <label for="topic-name">Topic Name (filename)</label>
+                            <label for="topic-name">Note Name (filename)</label>
                             <div class="input-prefix">
                                 <span id="topic-date-prefix"></span>
-                                <input type="text" id="topic-name" required placeholder="topic_name">
+                                <input type="text" id="topic-name" required placeholder="note_name">
                                 <span>.md</span>
                             </div>
                         </div>
@@ -212,17 +213,17 @@
                         </div>
                         <div class="form-actions">
                             <button type="button" class="btn btn-secondary" data-close="modal-topic">Cancel</button>
-                            <button type="submit" class="btn btn-primary">Create Topic</button>
+                            <button type="submit" class="btn btn-primary">Create Note</button>
                         </div>
                     </form>
                 </div>
             </div>
 
-            <!-- Topics Section (collapsible) -->
+            <!-- Notes Section (collapsible) -->
             <details class="topics-section">
-                <summary>Open Topics</summary>
+                <summary>Notes</summary>
                 <div id="topic-list" class="topic-list">
-                    <!-- Topics will be rendered here -->
+                    <!-- Notes will be rendered here -->
                 </div>
             </details>
 
@@ -248,11 +249,11 @@
                 </div>
             </div>
 
-            <!-- Edit Topic Modal -->
+            <!-- Edit Note Modal -->
             <div id="modal-topic-edit" class="modal hidden">
                 <div class="modal-content">
                     <div class="modal-header">
-                        <h2 id="topic-edit-modal-title">Edit Topic</h2>
+                        <h2 id="topic-edit-modal-title">Edit Note</h2>
                         <button class="btn-close" data-close="modal-topic-edit">&times;</button>
                     </div>
                     <form id="form-topic-edit">
@@ -267,9 +268,27 @@
                         </div>
                         <div class="form-actions">
                             <button type="button" class="btn btn-secondary" data-close="modal-topic-edit">Cancel</button>
-                            <button id="btn-topic-save" type="submit" class="btn btn-primary">Save Topic</button>
+                            <button id="btn-topic-save" type="submit" class="btn btn-primary">Save Note</button>
                         </div>
                     </form>
+                </div>
+            </div>
+
+            <!-- MCP Config Modal -->
+            <div id="modal-mcp" class="modal hidden">
+                <div class="modal-content modal-content-small">
+                    <div class="modal-header">
+                        <h2>MCP Config</h2>
+                        <button class="btn-close" data-close="modal-mcp">&times;</button>
+                    </div>
+                    <div class="mcp-dialog-body">
+                        <pre id="mcp-dialog-json" class="mcp-dialog-json">Loading...</pre>
+                        <p id="mcp-dialog-status" class="mcp-dialog-status"></p>
+                        <div class="form-actions">
+                            <button id="btn-mcp-copy" type="button" class="btn btn-primary">Copy</button>
+                            <button type="button" class="btn btn-secondary" data-close="modal-mcp">Close</button>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
