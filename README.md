@@ -47,9 +47,11 @@ python server.py
 
 Exposed MCP tools are intentionally restricted to task-safe operations only:
 
-- `taskman.list_tasks` (read tasks)
+- `taskman.list_tasks` (read tasks; filter by status, category, overdue, priority)
 - `taskman.create_task` (create task)
 - `taskman.set_task_status` (change task status)
+- `taskman.close_task` (close task; optional closing_remarks)
+- `taskman.create_note` (create a note in the notes folder)
 
 Not exposed via MCP:
 

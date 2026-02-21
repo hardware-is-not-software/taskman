@@ -721,12 +721,49 @@ select:focus {
     color: var(--gray-500);
 }
 
+.task-closing-remarks {
+    font-size: 0.8rem;
+    color: var(--gray-500);
+    margin-top: 0.25rem;
+    padding-left: 0.25rem;
+    border-left: 2px solid var(--gray-300);
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.close-task-prompt {
+    margin-top: 0.5rem;
+    padding: 0.5rem;
+    background: var(--gray-50);
+    border-radius: var(--radius);
+    border: 1px solid var(--gray-200);
+}
+
+.close-task-prompt textarea {
+    width: 100%;
+    padding: 0.5rem;
+    border: 1px solid var(--gray-300);
+    border-radius: var(--radius);
+    font-size: 0.9rem;
+    font-family: inherit;
+    resize: vertical;
+    min-height: 60px;
+    margin-bottom: 0.5rem;
+}
+
+.close-prompt-actions {
+    display: flex;
+    gap: 0.5rem;
+}
+
 /* Inline editing */
 .task-item.editing {
     border-left-color: var(--primary);
 }
 
 .task-item.editing .task-description,
+.task-item.editing .task-closing-remarks,
+.task-item.editing .close-task-prompt,
 .task-item.editing .task-actions {
     display: none;
 }

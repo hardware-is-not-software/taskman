@@ -151,6 +151,7 @@ function setupEventListeners() {
     
     // Task form submit
     formTask.addEventListener('submit', handleTaskSubmit);
+    document.getElementById('task-status').addEventListener('change', updateClosingRemarksVisibility);
     
     // Topic form submit
     formTopic.addEventListener('submit', handleTopicSubmit);
@@ -611,6 +612,14 @@ function renderTasks() {
                     ${renderCategoryBadges(task.categories)}
                 </div>
                 <div class="task-description ${task.status === 'closed' || task.status === 'deleted' ? 'closed' : ''}" onclick="startInlineEdit(${task.id})" data-tooltip="${escapeHtml(task.description).replace(/"/g, '&quot;')}">${escapeHtml(task.description)}</div>
+                ${task.closing_remarks ? `<div class="task-closing-remarks">${escapeHtml(task.closing_remarks)}</div>` : ''}
+                <div class="close-task-prompt" id="close-prompt-${task.id}" style="display: none;">
+                    <textarea id="close-remarks-${task.id}" rows="2" placeholder="Closing remarks (optional)..."></textarea>
+                    <div class="close-prompt-actions">
+                        <button type="button" class="btn btn-secondary" onclick="closeTaskSkip(${task.id})">Skip</button>
+                        <button type="button" class="btn btn-primary" onclick="closeTaskWithRemarks(${task.id})">Save</button>
+                    </div>
+                </div>
                 <div class="inline-edit">
                     <textarea id="edit-desc-${task.id}">${escapeHtml(task.description)}</textarea>
                     <div class="inline-edit-row">
@@ -630,6 +639,7 @@ function renderTasks() {
                         <select id="edit-categories-${task.id}">
                             ${renderCategoryOptions(getTaskPrimaryCategory(task))}
                         </select>
+                        <textarea id="edit-closing-remarks-${task.id}" rows="2" placeholder="Closing remarks (optional)...">${escapeHtml(task.closing_remarks || '')}</textarea>
                         <div class="inline-edit-actions">
                             <button class="btn btn-secondary" onclick="cancelInlineEdit(${task.id})">Cancel</button>
                             <button class="btn btn-primary" onclick="saveInlineEdit(${task.id})">Save</button>
@@ -647,20 +657,12 @@ function renderTasks() {
                     </button>
                 ` : ''}
                 ${task.status !== 'closed' && task.status !== 'deleted' ? `
-                    <button onclick="setTaskStatus(${task.id}, 'closed')" aria-label="Close" data-tooltip="Close">
+                    <button onclick="openCloseTaskPrompt(${task.id})" aria-label="Close" data-tooltip="Close">
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <polyline points="20 6 9 17 4 12"/>
                         </svg>
                     </button>
                 ` : ''}
-                <button onclick="createTopicFromTask(${task.id})" aria-label="Create Note" data-tooltip="Create Note">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-                        <polyline points="14 2 14 8 20 8"/>
-                        <line x1="12" y1="18" x2="12" y2="12"/>
-                        <line x1="9" y1="15" x2="15" y2="15"/>
-                    </svg>
-                </button>
                 ${task.status !== 'deleted' ? `
                 <button onclick="deleteTask(${task.id})" class="delete" aria-label="Mark Deleted" data-tooltip="Mark Deleted">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -715,6 +717,14 @@ function renderTopics() {
     `).join('');
 }
 
+function updateClosingRemarksVisibility() {
+    const statusField = document.getElementById('task-status');
+    const group = document.getElementById('task-closing-remarks-group');
+    if (statusField && group) {
+        group.style.display = statusField.value === 'closed' ? '' : 'none';
+    }
+}
+
 // Open task modal (for new tasks only)
 function openTaskModal() {
     const idField = document.getElementById('task-id');
@@ -728,7 +738,9 @@ function openTaskModal() {
     statusField.value = 'created';
     priorityField.value = 'normal';
     dueDateField.value = '';
+    document.getElementById('task-closing-remarks').value = '';
     renderTaskCategorySelect();
+    updateClosingRemarksVisibility();
     
     modalTask.classList.remove('hidden');
     descField.focus();
@@ -777,6 +789,8 @@ function cancelInlineEdit(id) {
             document.getElementById(`edit-priority-${id}`).value = task.priority;
             document.getElementById(`edit-due-date-${id}`).value = task.due_date || '';
             document.getElementById(`edit-categories-${id}`).value = getTaskPrimaryCategory(task);
+            const closingRemarksEl = document.getElementById(`edit-closing-remarks-${id}`);
+            if (closingRemarksEl) closingRemarksEl.value = task.closing_remarks || '';
         }
     }
 }
@@ -788,12 +802,14 @@ async function saveInlineEdit(id) {
     const due_date = document.getElementById(`edit-due-date-${id}`).value || null;
     const selectedCategory = document.getElementById(`edit-categories-${id}`).value;
     const categories = [selectedCategory || getDefaultCategory()];
+    const closingRemarksEl = document.getElementById(`edit-closing-remarks-${id}`);
+    const closing_remarks = closingRemarksEl ? closingRemarksEl.value.trim() : '';
     
     try {
         const response = await fetch(`/api/tasks/${id}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ description, status, priority, due_date, categories })
+            body: JSON.stringify({ description, status, priority, due_date, categories, closing_remarks: closing_remarks || null })
         });
         
         if (response.ok) {
@@ -826,6 +842,54 @@ async function setTaskStatus(id, status) {
     }
 }
 
+// Close task: show remarks prompt with Save / Skip
+function openCloseTaskPrompt(id) {
+    document.querySelectorAll('.close-task-prompt').forEach(el => { el.style.display = 'none'; });
+    const prompt = document.getElementById(`close-prompt-${id}`);
+    const textarea = document.getElementById(`close-remarks-${id}`);
+    if (prompt && textarea) {
+        textarea.value = '';
+        prompt.style.display = 'block';
+        textarea.focus();
+    }
+}
+
+async function closeTaskWithRemarks(id) {
+    const textarea = document.getElementById(`close-remarks-${id}`);
+    const remarks = textarea ? textarea.value.trim() : '';
+    try {
+        const body = { status: 'closed' };
+        if (remarks) body.closing_remarks = remarks;
+        const response = await fetch(`/api/tasks/${id}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+        });
+        if (response.ok) {
+            await loadTasks();
+        }
+    } catch (error) {
+        console.error('Failed to close task:', error);
+        alert('Failed to close task');
+    }
+}
+
+async function closeTaskSkip(id) {
+    try {
+        const response = await fetch(`/api/tasks/${id}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ status: 'closed' })
+        });
+        if (response.ok) {
+            await loadTasks();
+        }
+    } catch (error) {
+        console.error('Failed to close task:', error);
+        alert('Failed to close task');
+    }
+}
+
 // Delete task
 async function deleteTask(id) {
     if (!confirm('Mark this task as deleted?')) return;
@@ -849,13 +913,18 @@ async function handleTaskSubmit(e) {
     e.preventDefault();
     
     const id = document.getElementById('task-id').value;
+    const status = document.getElementById('task-status').value;
     const data = {
         description: document.getElementById('task-description').value,
-        status: document.getElementById('task-status').value,
+        status,
         priority: document.getElementById('task-priority').value,
         due_date: document.getElementById('task-due-date').value || null,
         categories: [document.getElementById('task-categories').value || getDefaultCategory()]
     };
+    if (status === 'closed') {
+        const remarks = (document.getElementById('task-closing-remarks').value || '').trim();
+        if (remarks) data.closing_remarks = remarks;
+    }
     
     try {
         let response;

@@ -66,11 +66,13 @@ curl -s http://localhost:5050/api/tasks
 
 ## 4) Use MCP
 
-Taskman exposes three tools:
+Taskman exposes these MCP tools:
 
-- `taskman.list_tasks`
+- `taskman.list_tasks` — list tasks with optional filters: status, category, overdue (boolean), priority, limit
 - `taskman.create_task`
 - `taskman.set_task_status`
+- `taskman.close_task` — close a task (set status to closed); optional `closing_remarks` for extra context
+- `taskman.create_note` — create a note in the notes folder (name, optional content, optional filepath)
 
 ## 5) Guardrails
 

@@ -450,12 +450,19 @@ def mcp_tools():
     return [
         {
             'name': 'taskman.list_tasks',
-            'description': 'List tasks with optional status/category filters.',
+            'description': (
+                'List tasks with optional filters. '
+                'Filter by status (created, active, due, closed, deleted), category (exact match), '
+                'overdue (true = only tasks with due_date in the past and status not closed/deleted), '
+                'and/or priority (urgent, normal, low). Limit result size with limit (default 200, max 500).'
+            ),
             'inputSchema': {
                 'type': 'object',
                 'properties': {
-                    'status': {'type': 'string'},
+                    'status': {'type': 'string', 'enum': ['created', 'active', 'due', 'closed', 'deleted']},
                     'category': {'type': 'string'},
+                    'overdue': {'type': 'boolean', 'description': 'If true, only return tasks that are overdue (have due_date < today and are not closed/deleted).'},
+                    'priority': {'type': 'string', 'enum': ['urgent', 'normal', 'low']},
                     'limit': {'type': 'integer', 'minimum': 1, 'maximum': 500}
                 }
             }
@@ -486,6 +493,31 @@ def mcp_tools():
                     'status': {'type': 'string', 'enum': ['created', 'active', 'due', 'closed', 'deleted']}
                 }
             }
+        },
+        {
+            'name': 'taskman.close_task',
+            'description': 'Close a task (set status to closed). Optionally provide closing_remarks to record why or how it was closed.',
+            'inputSchema': {
+                'type': 'object',
+                'required': ['task_id'],
+                'properties': {
+                    'task_id': {'type': 'integer'},
+                    'closing_remarks': {'type': 'string', 'description': 'Optional note or summary when closing the task.'}
+                }
+            }
+        },
+        {
+            'name': 'taskman.create_note',
+            'description': 'Create a new note file in the configured notes folder. Optionally set name and content; filepath can be used to place under a subpath of the notes folder.',
+            'inputSchema': {
+                'type': 'object',
+                'required': ['name'],
+                'properties': {
+                    'name': {'type': 'string', 'description': 'Note name (used for filename if filepath not set).'},
+                    'content': {'type': 'string', 'description': 'Initial note content.'},
+                    'filepath': {'type': 'string', 'description': 'Optional path relative to notes folder or absolute path inside notes folder.'}
+                }
+            }
         }
     ]
 
@@ -494,6 +526,8 @@ def mcp_list_tasks(arguments):
     tasks = parse_tasks()
     status = (arguments.get('status') or '').strip().lower()
     category = normalize_category_name(arguments.get('category'))
+    overdue = normalize_bool(arguments.get('overdue'), False)
+    priority = (arguments.get('priority') or '').strip().lower()
     limit = normalize_int(arguments.get('limit'), 200, minimum=1, maximum=500)
 
     if status:
@@ -504,6 +538,15 @@ def mcp_list_tasks(arguments):
             t for t in tasks
             if any(normalize_category_name(cat).lower() == wanted for cat in (t.get('categories') or []))
         ]
+    if overdue:
+        today = datetime.now().strftime('%Y-%m-%d')
+        tasks = [
+            t for t in tasks
+            if t.get('due_date') and t.get('due_date') < today
+            and (t.get('status') or '').lower() not in ('closed', 'deleted')
+        ]
+    if priority and priority in {'urgent', 'normal', 'low'}:
+        tasks = [t for t in tasks if (t.get('priority') or 'normal').lower() == priority]
     tasks = tasks[:limit]
     return build_mcp_tool_response({'tasks': tasks, 'count': len(tasks)})
 
@@ -568,6 +611,80 @@ def mcp_set_task_status(arguments):
     return build_mcp_tool_response({'task': target})
 
 
+def mcp_close_task(arguments):
+    task_id = arguments.get('task_id')
+    if not isinstance(task_id, int):
+        raise ValueError('task_id must be an integer')
+
+    closing_remarks = (arguments.get('closing_remarks') or '').strip()
+
+    tasks = parse_tasks()
+    target = next((t for t in tasks if t.get('id') == task_id), None)
+    if target is None:
+        raise ValueError('task not found')
+
+    target['status'] = 'closed'
+    if closing_remarks:
+        target['closing_remarks'] = closing_remarks
+    save_tasks(tasks)
+    return build_mcp_tool_response({'task': target})
+
+
+def _create_note_internal(name, content='', filepath=None):
+    """Create a note file in the configured notes folder. Returns dict with filename, name, date, path."""
+    config = load_storage_config()
+    topics_dir = config['topics_dir']
+    safe_name = re.sub(r'[^\w\-]', '_', (name or 'untitled').strip()) or 'untitled'
+    today = datetime.now()
+    requested_filepath = normalize_path(filepath) if filepath else None
+
+    if requested_filepath:
+        topics_dir_abs = os.path.abspath(topics_dir)
+        requested_abs = os.path.abspath(requested_filepath)
+        try:
+            same_root = os.path.commonpath([topics_dir_abs, requested_abs]) == topics_dir_abs
+        except ValueError:
+            same_root = False
+        if not same_root:
+            raise ValueError('Note file must be inside the configured notes folder')
+        filepath = requested_abs
+        if not filepath.lower().endswith('.md'):
+            filepath = f"{filepath}.md"
+        filename = os.path.basename(filepath)
+        safe_name = os.path.splitext(filename)[0]
+    else:
+        filename = f"{today.year}_{today.month}_{today.day}_{safe_name}.md"
+        filepath = os.path.join(topics_dir, filename)
+
+    if os.path.exists(filepath):
+        raise ValueError('Note with this name already exists')
+
+    os.makedirs(os.path.dirname(filepath), exist_ok=True)
+    with open(filepath, 'w', encoding='utf-8') as f:
+        f.write(content or '')
+
+    return {
+        'filename': filename,
+        'name': safe_name,
+        'date': today.strftime('%Y-%m-%d'),
+        'path': filepath
+    }
+
+
+def mcp_create_note(arguments):
+    name = (arguments.get('name') or '').strip()
+    if not name:
+        raise ValueError('name is required')
+    content = (arguments.get('content') or '').strip()
+    filepath = (arguments.get('filepath') or '').strip() or None
+    try:
+        create_auto_snapshot_if_needed('topic-create')
+    except OSError as exc:
+        raise RuntimeError(f'Automatic snapshot failed: {exc}') from exc
+    topic = _create_note_internal(name=name, content=content, filepath=filepath)
+    return build_mcp_tool_response({'note': topic})
+
+
 def handle_mcp_request(payload):
     method = payload.get('method')
     request_id = payload.get('id')
@@ -609,6 +726,10 @@ def handle_mcp_request(payload):
                 return ok(mcp_create_task(arguments))
             if name == 'taskman.set_task_status':
                 return ok(mcp_set_task_status(arguments))
+            if name == 'taskman.close_task':
+                return ok(mcp_close_task(arguments))
+            if name == 'taskman.create_note':
+                return ok(mcp_create_note(arguments))
             return err(-32601, f'Unknown tool: {name}')
         except (ValueError, RuntimeError) as exc:
             return err(-32000, str(exc))
@@ -645,6 +766,7 @@ def parse_tasks(tasks_file=None):
 
     current_task = None
     task_id = 0
+    in_closing_remarks = False
 
     for line in lines:
         line = line.rstrip('\n')
@@ -656,6 +778,7 @@ def parse_tasks(tasks_file=None):
         # Try current format first
         match = TASK_PATTERN.match(line)
         if match:
+            in_closing_remarks = False
             if current_task:
                 tasks.append(current_task)
             header, description = match.groups()
@@ -696,6 +819,7 @@ def parse_tasks(tasks_file=None):
         # Try legacy format
         legacy_match = LEGACY_PATTERN.match(line)
         if legacy_match:
+            in_closing_remarks = False
             if current_task:
                 tasks.append(current_task)
             status, description = legacy_match.groups()
@@ -713,8 +837,18 @@ def parse_tasks(tasks_file=None):
 
         # Continuation line (indented)
         if line.startswith('    ') and current_task:
+            if line.startswith('    [closing_remarks] '):
+                in_closing_remarks = True
+                # Prefix "    [closing_remarks] " is 22 chars
+                current_task['closing_remarks'] = line[22:]
+                continue
+            if in_closing_remarks:
+                current_task['closing_remarks'] += '\n' + line[4:]
+                continue
             current_task['description'] += '\n' + line[4:]
             continue
+
+        in_closing_remarks = False
 
     if current_task:
         tasks.append(current_task)
@@ -744,6 +878,13 @@ def save_tasks(tasks, tasks_file=None):
             desc_lines = task['description'].split('\n')
             for extra_line in desc_lines[1:]:
                 f.write(f"    {extra_line}\n")
+            # Write closing_remarks if present
+            closing_remarks = task.get('closing_remarks') or ''
+            if closing_remarks:
+                rem_lines = closing_remarks.split('\n')
+                f.write(f"    [closing_remarks] {rem_lines[0]}\n")
+                for rem_line in rem_lines[1:]:
+                    f.write(f"    {rem_line}\n")
 
 
 def next_snapshot_id(root_dir, prefix='snapshot'):
@@ -1205,6 +1346,9 @@ def update_task(task_id):
                 task['due_date'] = data.get('due_date')
             if 'categories' in data:
                 task['categories'] = normalize_task_categories(data.get('categories', []), categories)
+            if 'closing_remarks' in data:
+                val = (data.get('closing_remarks') or '').strip()
+                task['closing_remarks'] = val if val else None
             save_tasks(tasks)
             return jsonify(task)
 
@@ -1262,54 +1406,25 @@ def get_topics():
 @app.route('/api/topics', methods=['POST'])
 def create_topic():
     data = request.json or {}
-    config = load_storage_config()
-    topics_dir = config['topics_dir']
     try:
         create_auto_snapshot_if_needed('topic-create')
     except OSError as exc:
         return jsonify({'error': f'Automatic snapshot failed: {exc}'}), 500
     name = data.get('name', 'untitled')
     content = data.get('content', '')
-    requested_filepath = normalize_path(data.get('filepath'))
-
-    # Sanitize filename
-    safe_name = re.sub(r'[^\w\-]', '_', name)
-
-    today = datetime.now()
+    requested_filepath = data.get('filepath')
     if requested_filepath:
-        topics_dir_abs = os.path.abspath(topics_dir)
-        requested_abs = os.path.abspath(requested_filepath)
-        try:
-            same_root = os.path.commonpath([topics_dir_abs, requested_abs]) == topics_dir_abs
-        except ValueError:
-            same_root = False
-        if not same_root:
-            return jsonify({'error': 'Note file must be inside the configured notes folder'}), 400
-        filepath = requested_abs
-        if not filepath.lower().endswith('.md'):
-            filepath = f"{filepath}.md"
-        filename = os.path.basename(filepath)
-        safe_name = os.path.splitext(filename)[0]
-    else:
-        # Generate filename with date
-        filename = f"{today.year}_{today.month}_{today.day}_{safe_name}.md"
-        filepath = os.path.join(topics_dir, filename)
-
-    # Check if file already exists
-    if os.path.exists(filepath):
-        return jsonify({'error': 'Note with this name already exists'}), 409
-
-    # Create the file
-    os.makedirs(os.path.dirname(filepath), exist_ok=True)
-    with open(filepath, 'w', encoding='utf-8') as f:
-        f.write(content)
-
-    return jsonify({
-        'filename': filename,
-        'name': safe_name,
-        'date': today.strftime('%Y-%m-%d'),
-        'path': filepath
-    }), 201
+        requested_filepath = normalize_path(requested_filepath)
+    try:
+        topic = _create_note_internal(name=name, content=content, filepath=requested_filepath)
+    except ValueError as exc:
+        msg = str(exc)
+        if 'inside the configured notes folder' in msg:
+            return jsonify({'error': msg}), 400
+        if 'already exists' in msg:
+            return jsonify({'error': msg}), 409
+        return jsonify({'error': msg}), 400
+    return jsonify(topic), 201
 
 
 # API: Get note content
