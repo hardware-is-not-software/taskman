@@ -505,6 +505,7 @@ async function loadTasks() {
             ...task,
             categories: Array.isArray(task.categories) ? task.categories : []
         }));
+        updateDueTaskBadge(tasks);
         renderStatusFilters();
         renderCategoryFilters();
         renderTasks();
@@ -512,6 +513,35 @@ async function loadTasks() {
         console.error('Failed to load tasks:', error);
         taskList.innerHTML = '<div class="empty-state">Failed to load tasks</div>';
     }
+}
+
+async function updateDueTaskBadge(taskItems) {
+    if (!('setAppBadge' in navigator) || !('clearAppBadge' in navigator)) {
+        return;
+    }
+
+    const count = getDueTaskCount(taskItems);
+    try {
+        if (count > 0) {
+            await navigator.setAppBadge(count);
+        } else {
+            await navigator.clearAppBadge();
+        }
+    } catch (error) {
+        // Best effort only; badging support depends on platform/browser install mode.
+        console.debug('App badge update failed:', error);
+    }
+}
+
+function getDueTaskCount(taskItems) {
+    const today = startOfToday();
+    return (taskItems || []).filter(task => {
+        if (!task) return false;
+        if (task.status === 'closed' || task.status === 'deleted') return false;
+        if (task.status === 'due') return true;
+        const due = parseDate(task.due_date);
+        return !!due && due <= today;
+    }).length;
 }
 
 // API: Load topics

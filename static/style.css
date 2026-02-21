@@ -490,9 +490,10 @@ select:focus {
     background: var(--gray-900);
     color: var(--gray-50);
     font-size: 0.7rem;
-    max-width: min(360px, 80vw);
-    white-space: normal;
-    overflow-wrap: anywhere;
+    max-width: 80vw;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
     z-index: 1000;
     pointer-events: none;
 }
