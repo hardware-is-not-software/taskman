@@ -10,6 +10,10 @@ A lightweight task manager PWA built with Python/Flask and vanilla JavaScript.
 - **Priority**: Urgent, Normal, Low
 - **Filtering & Sorting**: Filter by status, sort by date or priority
 - **Open Topics**: Create detailed topic files from tasks
+- **Storage Panel**: Configure local live file paths and recovery destination
+- **Path Browser**: Browse and pick file/folder locations directly from the storage panel
+- **Automatic Cloud Sync Snapshots**: Auto-create protection snapshots before task/topic changes and write them to your configured synced folder
+- **Snapshots & Recovery**: Create snapshots and restore with task-only revert or full recovery
 - **Dark Mode**: Toggle between light and dark themes
 - **PWA Support**: Install as a standalone app on macOS/Windows
 - **Text Editor Compatible**: Data stored in human-readable markdown format
@@ -41,6 +45,12 @@ Example:
 (created|normal|2026-02-04) Update team documentation
 ```
 
+Storage locations are configurable in the app:
+
+- **Live files**: local paths for task and topic files
+- **Recovery snapshots**: folder path for snapshot storage (can be a OneDrive, SharePoint sync folder, or iCloud Drive folder)
+- **Auto protection**: optional auto snapshots before changes, with configurable interval and retention count
+
 ## File Structure
 
 ```
@@ -53,7 +63,7 @@ Example:
 │   ├── manifest.json   # PWA manifest
 │   └── sw.js           # Service worker
 ├── tasks/              # Task data (not in repo)
-└── open/               # Open topic files (not in repo)
+└── topics/             # Topic files (not in repo)
 ```
 
 ## Usage

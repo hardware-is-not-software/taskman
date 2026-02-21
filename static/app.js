@@ -5,21 +5,41 @@
 // State
 let tasks = [];
 let topics = [];
+let storageConfig = null;
+let snapshots = [];
+let selectedStatuses = new Set(['created', 'active', 'due']);
+const STATUS_OPTIONS = ['created', 'active', 'due', 'closed', 'deleted'];
+const RECOVERY_PROVIDER_LABELS = {
+    local: 'Local folder',
+    onedrive: 'OneDrive',
+    sharepoint: 'SharePoint drive',
+    icloud: 'iCloud Drive'
+};
 
 // DOM Elements
 const taskList = document.getElementById('task-list');
 const topicList = document.getElementById('topic-list');
-const filterStatus = document.getElementById('filter-status');
+const statusFilters = document.getElementById('status-filters');
 const sortBy = document.getElementById('sort-by');
+const formStorage = document.getElementById('form-storage');
+const snapshotList = document.getElementById('snapshot-list');
+const storageMessage = document.getElementById('storage-message');
+const appShell = document.querySelector('.app-shell');
+const storageToggleBtn = document.getElementById('btn-storage-toggle');
 
 // Modals
 const modalTask = document.getElementById('modal-task');
 const modalTopic = document.getElementById('modal-topic');
+const modalTopicEdit = document.getElementById('modal-topic-edit');
 const formTask = document.getElementById('form-task');
 const formTopic = document.getElementById('form-topic');
+const formTopicEdit = document.getElementById('form-topic-edit');
 
 // Initialize
 document.addEventListener('DOMContentLoaded', () => {
+    setStoragePanelCollapsed(false);
+    loadStorageConfig();
+    loadSnapshots();
     loadTasks();
     loadTopics();
     setupEventListeners();
@@ -78,6 +98,7 @@ function setupEventListeners() {
     // New topic button
     document.getElementById('btn-new-topic').addEventListener('click', () => {
         updateTopicDatePrefix();
+        document.getElementById('topic-path').value = '';
         document.getElementById('topic-name').value = '';
         document.getElementById('topic-content').value = '';
         modalTopic.classList.remove('hidden');
@@ -93,7 +114,7 @@ function setupEventListeners() {
     });
     
     // Close modal on backdrop click
-    [modalTask, modalTopic].forEach(modal => {
+    [modalTask, modalTopic, modalTopicEdit].forEach(modal => {
         modal.addEventListener('click', (e) => {
             if (e.target === modal) {
                 modal.classList.add('hidden');
@@ -106,10 +127,29 @@ function setupEventListeners() {
     
     // Topic form submit
     formTopic.addEventListener('submit', handleTopicSubmit);
+    formTopicEdit.addEventListener('submit', handleTopicEditSubmit);
     
     // Filter and sort changes
-    filterStatus.addEventListener('change', renderTasks);
     sortBy.addEventListener('change', renderTasks);
+
+    // Storage config submit
+    formStorage.addEventListener('submit', handleStorageSubmit);
+
+    // Snapshot actions
+    document.getElementById('btn-create-snapshot').addEventListener('click', createSnapshot);
+    snapshotList.addEventListener('click', handleSnapshotAction);
+    storageToggleBtn.addEventListener('click', () => {
+        const collapsed = appShell.classList.contains('storage-collapsed');
+        setStoragePanelCollapsed(!collapsed);
+    });
+
+    document.querySelectorAll('.btn-native-picker').forEach(button => {
+        button.addEventListener('click', () => {
+            const target = button.dataset.nativeTarget;
+            const mode = button.dataset.nativeMode || 'dir';
+            openNativePicker(target, mode);
+        });
+    });
     
     // Click outside to close inline edit
     document.addEventListener('click', (e) => {
@@ -123,6 +163,210 @@ function setupEventListeners() {
     // Auto-resize textarea
     document.getElementById('task-description').addEventListener('input', autoResize);
     document.getElementById('topic-content').addEventListener('input', autoResize);
+}
+
+async function openNativePicker(targetInputId, mode) {
+    const input = document.getElementById(targetInputId);
+    if (!input) return;
+    let initialPath = (input.value || '').trim();
+    if (!initialPath && targetInputId === 'topic-path' && storageConfig?.topics_dir) {
+        const topicName = (document.getElementById('topic-name')?.value || 'topic').trim() || 'topic';
+        const safeName = topicName.replace(/[^\w\-]/g, '_');
+        const now = new Date();
+        const suggested = `${now.getFullYear()}_${now.getMonth() + 1}_${now.getDate()}_${safeName}.md`;
+        initialPath = `${storageConfig.topics_dir}/${suggested}`;
+    }
+
+    try {
+        const response = await fetch('/api/fs/native-picker', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                mode,
+                initial_path: initialPath
+            })
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+            throw new Error(payload.error || 'Native picker failed');
+        }
+        if (!payload.cancelled && payload.path) {
+            input.value = payload.path;
+            setStorageMessage('Location selected from system dialog', 'success');
+        }
+    } catch (error) {
+        console.error('Native picker failed:', error);
+        setStorageMessage(error.message || 'Native picker unavailable. Use Browse…', 'error');
+    }
+}
+
+function setStoragePanelCollapsed(collapsed) {
+    appShell.classList.toggle('storage-collapsed', collapsed);
+    if (collapsed) {
+        storageToggleBtn.textContent = '▶';
+        storageToggleBtn.title = 'Maximize storage panel';
+        storageToggleBtn.setAttribute('aria-label', 'Maximize storage panel');
+    } else {
+        storageToggleBtn.textContent = '◀';
+        storageToggleBtn.title = 'Minimize storage panel';
+        storageToggleBtn.setAttribute('aria-label', 'Minimize storage panel');
+    }
+}
+
+function setStorageMessage(text, type = '') {
+    storageMessage.textContent = text || '';
+    storageMessage.classList.remove('success', 'error');
+    if (type) {
+        storageMessage.classList.add(type);
+    }
+}
+
+function applyStorageConfigToForm(config) {
+    document.getElementById('storage-tasks-file').value = config.tasks_file || '';
+    document.getElementById('storage-topics-dir').value = config.topics_dir || '';
+    document.getElementById('storage-provider').value = config.recovery_provider || 'local';
+    document.getElementById('storage-recovery-dir').value = config.recovery_dir || '';
+    document.getElementById('storage-auto-snapshot').checked = config.auto_snapshot_enabled !== false;
+    document.getElementById('storage-auto-interval').value = Number(config.auto_snapshot_interval_seconds ?? 30);
+    document.getElementById('storage-retention-count').value = Number(config.snapshot_retention_count ?? 200);
+}
+
+async function loadStorageConfig() {
+    try {
+        const response = await fetch('/api/storage');
+        if (!response.ok) {
+            throw new Error('Failed to load storage configuration');
+        }
+        storageConfig = await response.json();
+        applyStorageConfigToForm(storageConfig);
+        setStorageMessage('');
+    } catch (error) {
+        console.error('Failed to load storage config:', error);
+        setStorageMessage('Failed to load storage settings', 'error');
+    }
+}
+
+async function handleStorageSubmit(e) {
+    e.preventDefault();
+    const payload = {
+        tasks_file: document.getElementById('storage-tasks-file').value.trim(),
+        topics_dir: document.getElementById('storage-topics-dir').value.trim(),
+        recovery_provider: document.getElementById('storage-provider').value,
+        recovery_dir: document.getElementById('storage-recovery-dir').value.trim(),
+        auto_snapshot_enabled: document.getElementById('storage-auto-snapshot').checked,
+        auto_snapshot_interval_seconds: parseInt(document.getElementById('storage-auto-interval').value, 10),
+        snapshot_retention_count: parseInt(document.getElementById('storage-retention-count').value, 10)
+    };
+
+    try {
+        const response = await fetch('/api/storage', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.error || 'Failed to save storage settings');
+        }
+        storageConfig = await response.json();
+        applyStorageConfigToForm(storageConfig);
+        setStorageMessage('Storage settings saved', 'success');
+        await Promise.all([loadTasks(), loadTopics(), loadSnapshots()]);
+    } catch (error) {
+        console.error('Failed to save storage settings:', error);
+        setStorageMessage(error.message || 'Failed to save storage settings', 'error');
+    }
+}
+
+async function loadSnapshots() {
+    try {
+        const response = await fetch('/api/snapshots');
+        if (!response.ok) {
+            throw new Error('Failed to load snapshots');
+        }
+        snapshots = await response.json();
+        renderSnapshots();
+    } catch (error) {
+        console.error('Failed to load snapshots:', error);
+        snapshotList.innerHTML = '<div class="empty-state">Failed to load snapshots</div>';
+    }
+}
+
+function renderSnapshots() {
+    if (!snapshots.length) {
+        snapshotList.innerHTML = '<div class="empty-state">No snapshots yet</div>';
+        return;
+    }
+
+    snapshotList.innerHTML = snapshots.map(snapshot => `
+        <div class="snapshot-item">
+            <span class="snapshot-id">${escapeHtml(snapshot.id)}</span>
+            <div class="snapshot-meta">${formatDateTime(snapshot.created_at)} • ${escapeHtml(snapshot.mode || 'manual')} • ${escapeHtml(RECOVERY_PROVIDER_LABELS[snapshot.provider] || snapshot.provider)}</div>
+            <div class="snapshot-actions">
+                <button type="button" class="btn btn-secondary btn-small" data-action="revert" data-id="${escapeAttribute(snapshot.id)}">Revert Tasks</button>
+                <button type="button" class="btn btn-primary btn-small" data-action="full" data-id="${escapeAttribute(snapshot.id)}">Full Recovery</button>
+            </div>
+        </div>
+    `).join('');
+}
+
+async function createSnapshot() {
+    setStorageMessage('Creating snapshot...');
+    try {
+        const response = await fetch('/api/snapshots', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({})
+        });
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.error || 'Failed to create snapshot');
+        }
+        const snapshot = await response.json();
+        setStorageMessage(`Snapshot created: ${snapshot.id}`, 'success');
+        await loadSnapshots();
+    } catch (error) {
+        console.error('Failed to create snapshot:', error);
+        setStorageMessage(error.message || 'Failed to create snapshot', 'error');
+    }
+}
+
+async function handleSnapshotAction(e) {
+    const action = e.target.dataset.action;
+    const snapshotId = e.target.dataset.id;
+    if (!action || !snapshotId) return;
+
+    let mode = '';
+    let promptText = '';
+    if (action === 'revert') {
+        mode = 'revert';
+        promptText = 'Revert tasks file to this snapshot?';
+    } else if (action === 'full') {
+        mode = 'full';
+        promptText = 'Run full recovery? This restores both tasks and open topics from the snapshot.';
+    } else {
+        return;
+    }
+
+    if (!confirm(promptText)) return;
+
+    setStorageMessage('Restoring snapshot...');
+    try {
+        const response = await fetch(`/api/snapshots/${encodeURIComponent(snapshotId)}/restore`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mode })
+        });
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.error || 'Recovery failed');
+        }
+        setStorageMessage(`Recovery complete (${mode})`, 'success');
+        await Promise.all([loadTasks(), loadTopics(), loadSnapshots()]);
+    } catch (error) {
+        console.error('Failed to restore snapshot:', error);
+        setStorageMessage(error.message || 'Recovery failed', 'error');
+    }
 }
 
 // Auto-resize textarea
@@ -143,6 +387,7 @@ async function loadTasks() {
     try {
         const response = await fetch('/api/tasks');
         tasks = await response.json();
+        renderStatusFilters();
         renderTasks();
     } catch (error) {
         console.error('Failed to load tasks:', error);
@@ -163,13 +408,14 @@ async function loadTopics() {
 
 // Render tasks
 function renderTasks() {
-    const status = filterStatus.value;
     const sort = sortBy.value;
     
     // Filter
     let filtered = tasks;
-    if (status !== 'all') {
-        filtered = tasks.filter(t => t.status === status);
+    if (selectedStatuses.size === 0) {
+        filtered = [];
+    } else {
+        filtered = tasks.filter(t => selectedStatuses.has(t.status));
     }
     
     // Sort
@@ -191,27 +437,31 @@ function renderTasks() {
     }
     
     taskList.innerHTML = filtered.map(task => `
-        <div class="task-item" data-id="${task.id}" data-status="${task.status}" data-priority="${task.priority}">
+        <div class="task-item ${getDueClass(task)}" data-id="${task.id}" data-status="${task.status}" data-priority="${task.priority}">
             <div class="task-content">
                 <div class="task-meta">
                     <span class="status-badge ${task.status}">${task.status}</span>
                     <span class="priority-badge ${task.priority}">${task.priority}</span>
                     <span class="task-date">${formatDate(task.date)}</span>
+                    ${renderDueBadge(task)}
                 </div>
-                <div class="task-description ${task.status === 'closed' ? 'closed' : ''}" onclick="startInlineEdit(${task.id})" title="${escapeHtml(task.description).replace(/"/g, '&quot;')}">${escapeHtml(task.description)}</div>
+                <div class="task-description ${task.status === 'closed' || task.status === 'deleted' ? 'closed' : ''}" onclick="startInlineEdit(${task.id})" title="${escapeHtml(task.description).replace(/"/g, '&quot;')}">${escapeHtml(task.description)}</div>
                 <div class="inline-edit">
                     <textarea id="edit-desc-${task.id}">${escapeHtml(task.description)}</textarea>
                     <div class="inline-edit-row">
                         <select id="edit-status-${task.id}">
                             <option value="created" ${task.status === 'created' ? 'selected' : ''}>Created</option>
                             <option value="active" ${task.status === 'active' ? 'selected' : ''}>Active</option>
+                            <option value="due" ${task.status === 'due' ? 'selected' : ''}>Due</option>
                             <option value="closed" ${task.status === 'closed' ? 'selected' : ''}>Closed</option>
+                            <option value="deleted" ${task.status === 'deleted' ? 'selected' : ''}>Deleted</option>
                         </select>
                         <select id="edit-priority-${task.id}">
                             <option value="urgent" ${task.priority === 'urgent' ? 'selected' : ''}>Urgent</option>
                             <option value="normal" ${task.priority === 'normal' ? 'selected' : ''}>Normal</option>
                             <option value="low" ${task.priority === 'low' ? 'selected' : ''}>Low</option>
                         </select>
+                        <input type="date" id="edit-due-date-${task.id}" value="${escapeAttribute(task.due_date || '')}">
                         <div class="inline-edit-actions">
                             <button class="btn btn-secondary" onclick="cancelInlineEdit(${task.id})">Cancel</button>
                             <button class="btn btn-primary" onclick="saveInlineEdit(${task.id})">Save</button>
@@ -220,7 +470,7 @@ function renderTasks() {
                 </div>
             </div>
             <div class="task-actions">
-                ${task.status !== 'active' ? `
+                ${task.status !== 'active' && task.status !== 'deleted' ? `
                     <button onclick="setTaskStatus(${task.id}, 'active')" title="Set Active">
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <circle cx="12" cy="12" r="10"/>
@@ -228,7 +478,7 @@ function renderTasks() {
                         </svg>
                     </button>
                 ` : ''}
-                ${task.status !== 'closed' ? `
+                ${task.status !== 'closed' && task.status !== 'deleted' ? `
                     <button onclick="setTaskStatus(${task.id}, 'closed')" title="Close">
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <polyline points="20 6 9 17 4 12"/>
@@ -243,12 +493,14 @@ function renderTasks() {
                         <line x1="9" y1="15" x2="15" y2="15"/>
                     </svg>
                 </button>
-                <button onclick="deleteTask(${task.id})" class="delete" title="Delete">
+                ${task.status !== 'deleted' ? `
+                <button onclick="deleteTask(${task.id})" class="delete" title="Mark Deleted">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <polyline points="3 6 5 6 21 6"/>
                         <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
                     </svg>
                 </button>
+                ` : ''}
             </div>
         </div>
     `).join('');
@@ -264,7 +516,11 @@ function renderTopics() {
     topicList.innerHTML = topics.map(topic => `
         <div class="topic-item">
             <span class="topic-name">${escapeHtml(topic.name)}</span>
-            <span class="topic-date">${topic.date}</span>
+            <div class="topic-actions">
+                <span class="topic-date">${topic.date}</span>
+                <button type="button" class="btn btn-secondary btn-small" onclick="openTopicViewer('${escapeAttribute(topic.filename)}')">View</button>
+                <button type="button" class="btn btn-secondary btn-small" onclick="openTopicEditor('${escapeAttribute(topic.filename)}')">Edit</button>
+            </div>
         </div>
     `).join('');
 }
@@ -275,11 +531,13 @@ function openTaskModal() {
     const descField = document.getElementById('task-description');
     const statusField = document.getElementById('task-status');
     const priorityField = document.getElementById('task-priority');
+    const dueDateField = document.getElementById('task-due-date');
     
     idField.value = '';
     descField.value = '';
     statusField.value = 'created';
     priorityField.value = 'normal';
+    dueDateField.value = '';
     
     modalTask.classList.remove('hidden');
     descField.focus();
@@ -326,6 +584,7 @@ function cancelInlineEdit(id) {
             document.getElementById(`edit-desc-${id}`).value = task.description;
             document.getElementById(`edit-status-${id}`).value = task.status;
             document.getElementById(`edit-priority-${id}`).value = task.priority;
+            document.getElementById(`edit-due-date-${id}`).value = task.due_date || '';
         }
     }
 }
@@ -334,12 +593,13 @@ async function saveInlineEdit(id) {
     const description = document.getElementById(`edit-desc-${id}`).value;
     const status = document.getElementById(`edit-status-${id}`).value;
     const priority = document.getElementById(`edit-priority-${id}`).value;
+    const due_date = document.getElementById(`edit-due-date-${id}`).value || null;
     
     try {
         const response = await fetch(`/api/tasks/${id}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ description, status, priority })
+            body: JSON.stringify({ description, status, priority, due_date })
         });
         
         if (response.ok) {
@@ -374,7 +634,7 @@ async function setTaskStatus(id, status) {
 
 // Delete task
 async function deleteTask(id) {
-    if (!confirm('Delete this task?')) return;
+    if (!confirm('Mark this task as deleted?')) return;
     
     try {
         const response = await fetch(`/api/tasks/${id}`, {
@@ -398,7 +658,8 @@ async function handleTaskSubmit(e) {
     const data = {
         description: document.getElementById('task-description').value,
         status: document.getElementById('task-status').value,
-        priority: document.getElementById('task-priority').value
+        priority: document.getElementById('task-priority').value,
+        due_date: document.getElementById('task-due-date').value || null
     };
     
     try {
@@ -446,6 +707,7 @@ function createTopicFromTask(taskId) {
     const suggestedName = words.join('_').replace(/[^\w\-]/g, '').substring(0, 30);
     
     document.getElementById('topic-name').value = suggestedName;
+    document.getElementById('topic-path').value = '';
     document.getElementById('topic-content').value = task.description;
     
     modalTopic.classList.remove('hidden');
@@ -457,6 +719,7 @@ function createTopicFromTask(taskId) {
 async function handleTopicSubmit(e) {
     e.preventDefault();
     
+    const filepath = document.getElementById('topic-path').value.trim();
     const name = document.getElementById('topic-name').value;
     const content = document.getElementById('topic-content').value;
     
@@ -464,7 +727,7 @@ async function handleTopicSubmit(e) {
         const response = await fetch('/api/topics', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name, content })
+            body: JSON.stringify({ name, content, filepath })
         });
         
         if (response.ok) {
@@ -481,6 +744,136 @@ async function handleTopicSubmit(e) {
     }
 }
 
+async function openTopicEditor(filename) {
+    try {
+        const response = await fetch(`/api/topics/${encodeURIComponent(filename)}`);
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.error || 'Failed to load topic');
+        }
+        const topic = await response.json();
+        setTopicEditMode(true);
+        document.getElementById('topic-edit-filename').value = topic.filename;
+        document.getElementById('topic-edit-name').value = topic.filename;
+        document.getElementById('topic-edit-content').value = topic.content || '';
+        modalTopicEdit.classList.remove('hidden');
+        document.getElementById('topic-edit-content').focus();
+    } catch (error) {
+        console.error('Failed to open topic editor:', error);
+        alert(error.message || 'Failed to open topic');
+    }
+}
+
+async function openTopicViewer(filename) {
+    try {
+        const response = await fetch(`/api/topics/${encodeURIComponent(filename)}`);
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.error || 'Failed to load topic');
+        }
+        const topic = await response.json();
+        setTopicEditMode(false);
+        document.getElementById('topic-edit-filename').value = topic.filename;
+        document.getElementById('topic-edit-name').value = topic.filename;
+        document.getElementById('topic-edit-content').value = topic.content || '';
+        modalTopicEdit.classList.remove('hidden');
+    } catch (error) {
+        console.error('Failed to open topic viewer:', error);
+        alert(error.message || 'Failed to open topic');
+    }
+}
+
+async function handleTopicEditSubmit(e) {
+    e.preventDefault();
+
+    const filename = document.getElementById('topic-edit-filename').value;
+    const content = document.getElementById('topic-edit-content').value;
+    if (!filename) return;
+
+    try {
+        const response = await fetch(`/api/topics/${encodeURIComponent(filename)}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ content })
+        });
+
+        if (response.ok) {
+            modalTopicEdit.classList.add('hidden');
+            await loadTopics();
+        } else {
+            const error = await response.json();
+            alert(error.error || 'Failed to save topic');
+        }
+    } catch (error) {
+        console.error('Failed to save topic:', error);
+        alert('Failed to save topic');
+    }
+}
+
+function setTopicEditMode(isEditable) {
+    const title = document.getElementById('topic-edit-modal-title');
+    const textarea = document.getElementById('topic-edit-content');
+    const saveBtn = document.getElementById('btn-topic-save');
+    title.textContent = isEditable ? 'Edit Topic' : 'View Topic';
+    textarea.readOnly = !isEditable;
+    saveBtn.style.display = isEditable ? 'inline-flex' : 'none';
+}
+
+function renderStatusFilters() {
+    if (!statusFilters) return;
+    statusFilters.innerHTML = '';
+
+    STATUS_OPTIONS.forEach(status => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = `status-chip ${selectedStatuses.has(status) ? 'active' : ''}`;
+        btn.textContent = status.charAt(0).toUpperCase() + status.slice(1);
+        btn.addEventListener('click', () => {
+            if (selectedStatuses.has(status)) {
+                selectedStatuses.delete(status);
+            } else {
+                selectedStatuses.add(status);
+            }
+            renderStatusFilters();
+            renderTasks();
+        });
+        statusFilters.appendChild(btn);
+    });
+}
+
+function getDueClass(task) {
+    if (!task || task.status === 'closed' || task.status === 'deleted') return '';
+    if (task.status === 'due') return 'due';
+    const due = parseDate(task.due_date);
+    if (!due) return '';
+    const today = startOfToday();
+    return due <= today ? 'due' : '';
+}
+
+function renderDueBadge(task) {
+    const due = parseDate(task.due_date);
+    if (!due) return '';
+    const today = startOfToday();
+    let state = 'upcoming';
+    if (due < today) {
+        state = 'overdue';
+    } else if (due.getTime() === today.getTime()) {
+        state = 'due';
+    }
+    return `<span class="due-badge ${state}">Due ${formatDate(task.due_date)}</span>`;
+}
+
+function parseDate(dateStr) {
+    if (!dateStr) return null;
+    const date = new Date(`${dateStr}T00:00:00`);
+    return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function startOfToday() {
+    const now = new Date();
+    return new Date(now.getFullYear(), now.getMonth(), now.getDate());
+}
+
 // Utility: Format date
 function formatDate(dateStr) {
     const date = new Date(dateStr);
@@ -491,11 +884,23 @@ function formatDate(dateStr) {
     });
 }
 
+function formatDateTime(dateTimeStr) {
+    const date = new Date(dateTimeStr);
+    if (Number.isNaN(date.getTime())) {
+        return dateTimeStr;
+    }
+    return date.toLocaleString();
+}
+
 // Utility: Escape HTML
 function escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text;
     return div.innerHTML;
+}
+
+function escapeAttribute(text) {
+    return escapeHtml(text).replace(/"/g, '&quot;');
 }
 
 // Register service worker
