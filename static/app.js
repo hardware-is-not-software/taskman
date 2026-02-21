@@ -8,15 +8,14 @@ let topics = [];
 let storageConfig = null;
 let snapshots = [];
 let categories = [];
-let selectedStatuses = new Set(['created', 'active', 'due']);
+let selectedStatuses = new Set(['created', 'active']);
 let selectedCategories = new Set();
-const STATUS_OPTIONS = ['created', 'active', 'due', 'closed', 'deleted'];
+const STATUS_OPTIONS = ['created', 'active', 'closed', 'deleted'];
 const STATUS_SORT_ORDER = {
-    due: 0,
-    active: 1,
-    created: 2,
-    closed: 3,
-    deleted: 4
+    active: 0,
+    created: 1,
+    closed: 2,
+    deleted: 3
 };
 const RECOVERY_PROVIDER_LABELS = {
     local: 'Local folder',
@@ -540,7 +539,6 @@ function getDueTaskCount(taskItems) {
     return (taskItems || []).filter(task => {
         if (!task) return false;
         if (task.status === 'closed' || task.status === 'deleted') return false;
-        if (task.status === 'due') return true;
         const due = parseDate(task.due_date);
         return !!due && due <= today;
     }).length;
@@ -627,7 +625,6 @@ function renderTasks() {
                         <select id="edit-status-${task.id}">
                             <option value="created" ${task.status === 'created' ? 'selected' : ''}>Created</option>
                             <option value="active" ${task.status === 'active' ? 'selected' : ''}>Active</option>
-                            <option value="due" ${task.status === 'due' ? 'selected' : ''}>Due</option>
                             <option value="closed" ${task.status === 'closed' ? 'selected' : ''}>Closed</option>
                             <option value="deleted" ${task.status === 'deleted' ? 'selected' : ''}>Deleted</option>
                         </select>
@@ -1248,7 +1245,6 @@ async function handleCategoryManagerAction(e) {
 
 function getDueClass(task) {
     if (!task || task.status === 'closed' || task.status === 'deleted') return '';
-    if (task.status === 'due') return 'due';
     const due = parseDate(task.due_date);
     if (!due) return '';
     const today = startOfToday();

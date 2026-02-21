@@ -21,7 +21,7 @@ app = Flask(__name__, static_folder='static', static_url_path='')
 
 # Paths
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_TASKS_FILE = os.path.join(BASE_DIR, 'tasks', 'runnning.md')
+DEFAULT_TASKS_FILE = os.path.join(BASE_DIR, 'tasks', 'tasks.md')
 DEFAULT_TOPICS_DIR = os.path.join(BASE_DIR, 'topics')
 DEFAULT_RECOVERY_DIR = os.path.join(BASE_DIR, 'recovery')
 STORAGE_CONFIG_FILE = os.path.join(BASE_DIR, 'storage_config.json')
@@ -35,7 +35,7 @@ MCP_SERVER_NAME = 'taskman-mcp'
 MCP_SERVER_VERSION = '1.0.0'
 MCP_PORT = 5051
 
-STATUS_OPTIONS = ['created', 'active', 'due', 'closed', 'deleted']
+STATUS_OPTIONS = ['created', 'active', 'closed', 'deleted']
 
 # Task format regex: (status|priority|date|due|categories) description
 TASK_PATTERN = re.compile(r'^\(([^)]+)\)\s+(.+)$')
@@ -703,13 +703,13 @@ def write_snapshot(snapshot_id, mode='manual', trigger='manual'):
     topics_dir = config['topics_dir']
 
     if os.path.exists(tasks_file):
-        shutil.copy2(tasks_file, os.path.join(snapshot_dir, 'runnning.md'))
+        shutil.copy2(tasks_file, os.path.join(snapshot_dir, 'tasks.md'))
     if os.path.exists(STORAGE_CONFIG_FILE):
         shutil.copy2(STORAGE_CONFIG_FILE, os.path.join(snapshot_dir, 'storage_config.json'))
     if os.path.exists(CATEGORIES_FILE):
         shutil.copy2(CATEGORIES_FILE, os.path.join(snapshot_dir, 'categories.json'))
 
-    topics_snapshot_dir = os.path.join(snapshot_dir, 'open')
+    topics_snapshot_dir = os.path.join(snapshot_dir, 'topics')
     if os.path.isdir(topics_dir):
         shutil.copytree(topics_dir, topics_snapshot_dir)
     else:
@@ -795,8 +795,13 @@ def restore_snapshot(snapshot_id, mode):
     backup_id = next_snapshot_id(snapshots_dir, prefix='pre_restore')
     write_snapshot(backup_id, mode='pre-restore', trigger='before-restore')
 
-    source_tasks = os.path.join(snapshot_dir, 'runnning.md')
-    source_topics = os.path.join(snapshot_dir, 'open')
+    # Support both current ('tasks.md'/'topics') and legacy ('runnning.md'/'open') snapshot layouts.
+    source_tasks = os.path.join(snapshot_dir, 'tasks.md')
+    if not os.path.exists(source_tasks):
+        source_tasks = os.path.join(snapshot_dir, 'runnning.md')
+    source_topics = os.path.join(snapshot_dir, 'topics')
+    if not os.path.isdir(source_topics):
+        source_topics = os.path.join(snapshot_dir, 'open')
     source_storage_config = os.path.join(snapshot_dir, 'storage_config.json')
     source_categories = os.path.join(snapshot_dir, 'categories.json')
 
@@ -822,6 +827,15 @@ def restore_snapshot(snapshot_id, mode):
 # MCP tools (FastMCP)
 # ---------------------------------------------------------------------------
 
+def _compute_is_due(task, today: str) -> bool:
+    """Return True if the task has a due_date on or before today and is not closed/deleted."""
+    due = task.get('due_date')
+    if not due:
+        return False
+    status = (task.get('status') or '').lower()
+    return due <= today and status not in ('closed', 'deleted')
+
+
 @mcp.tool()
 def list_tasks(
     status: str | None = None,
@@ -833,14 +847,17 @@ def list_tasks(
     """List tasks with optional filters.
 
     Args:
-        status: Filter by status: created, active, due, closed, deleted.
+        status: Filter by status: created, active, closed, deleted.
         category: Filter by category name (exact match).
-        overdue: If true, only return tasks with due_date in the past that are not closed/deleted.
+        overdue: If true, only return tasks with due_date on or before today that are not closed/deleted.
         priority: Filter by priority: urgent, normal, low.
         limit: Max tasks to return (1-500, default 200).
+
+    Each returned task includes an `is_due` boolean computed from its due_date vs today.
     """
     tasks = parse_tasks()
     limit = max(1, min(500, limit))
+    today = datetime.now().strftime('%Y-%m-%d')
 
     if status:
         tasks = [t for t in tasks if (t.get('status') or '').lower() == status.strip().lower()]
@@ -851,16 +868,13 @@ def list_tasks(
             if any(normalize_category_name(cat).lower() == wanted for cat in (t.get('categories') or []))
         ]
     if overdue:
-        today = datetime.now().strftime('%Y-%m-%d')
-        tasks = [
-            t for t in tasks
-            if t.get('due_date') and t['due_date'] < today
-            and (t.get('status') or '').lower() not in ('closed', 'deleted')
-        ]
+        tasks = [t for t in tasks if _compute_is_due(t, today)]
     if priority and priority.lower() in {'urgent', 'normal', 'low'}:
         tasks = [t for t in tasks if (t.get('priority') or 'normal').lower() == priority.lower()]
 
     tasks = tasks[:limit]
+    for task in tasks:
+        task['is_due'] = _compute_is_due(task, today)
     return {'tasks': tasks, 'count': len(tasks)}
 
 
@@ -876,7 +890,7 @@ def create_task(
 
     Args:
         description: Task description text.
-        status: Initial status: created, active, due, closed, deleted. Default: created.
+        status: Initial status: created, active, closed, deleted. Default: created.
         priority: Priority: urgent, normal, low. Default: normal.
         due_date: Optional due date in YYYY-MM-DD format.
         category: Optional category name.
@@ -897,6 +911,11 @@ def create_task(
         due_date = due_date.strip()
         if not is_date(due_date):
             raise ValueError('due_date must use YYYY-MM-DD')
+
+    try:
+        create_auto_snapshot_if_needed('task-create')
+    except OSError as exc:
+        raise RuntimeError(f'Automatic snapshot failed: {exc}') from exc
 
     categories = load_categories()
     chosen_category = normalize_category_name(category) if category else get_default_category(categories)
@@ -925,7 +944,7 @@ def set_task_status(task_id: int, status: str) -> dict:
 
     Args:
         task_id: Integer task ID.
-        status: New status: created, active, due, closed, deleted.
+        status: New status: created, active, closed, deleted.
     """
     status = status.strip().lower()
     if status not in STATUS_OPTIONS:
@@ -935,6 +954,11 @@ def set_task_status(task_id: int, status: str) -> dict:
     target = next((t for t in tasks if t.get('id') == task_id), None)
     if target is None:
         raise ValueError('task not found')
+
+    try:
+        create_auto_snapshot_if_needed('task-update')
+    except OSError as exc:
+        raise RuntimeError(f'Automatic snapshot failed: {exc}') from exc
 
     target['status'] = status
     save_tasks(tasks)
@@ -953,6 +977,11 @@ def close_task(task_id: int, closing_remarks: str | None = None) -> dict:
     target = next((t for t in tasks if t.get('id') == task_id), None)
     if target is None:
         raise ValueError('task not found')
+
+    try:
+        create_auto_snapshot_if_needed('task-close')
+    except OSError as exc:
+        raise RuntimeError(f'Automatic snapshot failed: {exc}') from exc
 
     target['status'] = 'closed'
     if closing_remarks and closing_remarks.strip():
