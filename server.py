@@ -2,6 +2,7 @@
 """
 Task Manager - Flask API Server
 Manages tasks in markdown and note files with configurable storage and snapshots.
+MCP tools are served via FastMCP on port 5051 (streamable-HTTP transport).
 """
 
 from flask import Flask, jsonify, request, send_from_directory
@@ -12,6 +13,9 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
+
+from mcp.server.fastmcp import FastMCP
 
 app = Flask(__name__, static_folder='static', static_url_path='')
 
@@ -27,9 +31,10 @@ STARTUP_LOG_FILE = os.path.join(BASE_DIR, 'server.log')
 DEFAULT_CATEGORY = 'default'
 ALLOWED_PROVIDERS = {'local', 'onedrive', 'sharepoint', 'icloud'}
 SNAPSHOT_NAME_PATTERN = re.compile(r'^[A-Za-z0-9_-]+$')
-MCP_PROTOCOL_VERSION = '2024-11-05'
 MCP_SERVER_NAME = 'taskman-mcp'
 MCP_SERVER_VERSION = '1.0.0'
+MCP_PORT = 5051
+
 STATUS_OPTIONS = ['created', 'active', 'due', 'closed', 'deleted']
 
 # Task format regex: (status|priority|date|due|categories) description
@@ -37,6 +42,17 @@ TASK_PATTERN = re.compile(r'^\(([^)]+)\)\s+(.+)$')
 # Legacy format: (status)   description
 LEGACY_PATTERN = re.compile(r'^\((\w+)\)\s+(.+)$')
 
+# FastMCP instance — serves MCP streamable-HTTP transport on MCP_PORT
+mcp = FastMCP(
+    MCP_SERVER_NAME,
+    host='0.0.0.0',
+    port=MCP_PORT,
+)
+
+
+# ---------------------------------------------------------------------------
+# Utility helpers
+# ---------------------------------------------------------------------------
 
 def normalize_path(value):
     if not isinstance(value, str):
@@ -146,18 +162,15 @@ def load_storage_config():
     defaults = default_storage_config()
     config_path = STORAGE_CONFIG_FILE
 
-    # First startup path: create default storage config and targets.
     if not os.path.exists(config_path) and not os.path.exists(LEGACY_STORAGE_CONFIG_FILE):
         config = normalized_storage_config(defaults)
         try:
             ensure_storage_targets(config)
             save_storage_config(config)
         except OSError:
-            # Best effort initialization; still return defaults for UI/API.
             pass
         return config
 
-    # Backward compatibility: read legacy config if needed and migrate to root config.
     if not os.path.exists(config_path) and os.path.exists(LEGACY_STORAGE_CONFIG_FILE):
         config_path = LEGACY_STORAGE_CONFIG_FILE
 
@@ -189,9 +202,7 @@ def normalize_category_name(value):
     name = value.strip()
     if not name:
         return ''
-    # Keep category names file-safe for task header serialization.
     name = re.sub(r'[|()]+', '-', name)
-    # Repair legacy parser artifacts from "||category" headers.
     name = name.lstrip('-').strip()
     return name
 
@@ -277,6 +288,10 @@ def normalize_task_categories(value, allowed_categories=None):
     if not resolved:
         resolved = [allowed_lookup.get(DEFAULT_CATEGORY, DEFAULT_CATEGORY)]
     return resolved
+
+
+def normalize_categories(value):
+    return normalize_category_list(value)
 
 
 def sync_categories_from_tasks(tasks):
@@ -389,7 +404,6 @@ def native_pick_path(mode, initial_path):
     )
 
     if result.returncode != 0:
-        # AppleScript -128 means user canceled.
         if '(-128)' in (result.stderr or ''):
             return {'cancelled': True, 'path': ''}
         raise RuntimeError((result.stderr or 'System picker failed').strip())
@@ -400,19 +414,17 @@ def native_pick_path(mode, initial_path):
     return {'cancelled': False, 'path': normalize_path(selected)}
 
 
-def normalize_categories(value):
-    return normalize_category_list(value)
-
-
 def is_date(value):
     return bool(re.match(r'^\d{4}-\d{2}-\d{2}$', value))
 
 
 def mcp_server_config(web_url='http://localhost:5050'):
+    mcp_url = f'http://localhost:{MCP_PORT}/mcp'
     return {
         'mcpServers': {
             MCP_SERVER_NAME: {
-                'url': f"{web_url.rstrip('/')}/mcp"
+                'url': mcp_url,
+                'type': 'http',
             }
         }
     }
@@ -426,6 +438,7 @@ def write_startup_log(web_url, config):
         f"Tasks file: {config['tasks_file']}",
         f"Notes: {config['topics_dir']}",
         f"Recovery snapshots: {snapshot_root(config)}",
+        f"MCP server: http://localhost:{MCP_PORT}/mcp",
         f"MCP server config: {json.dumps(mcp_config, ensure_ascii=True)}",
         ""
     ]
@@ -433,205 +446,141 @@ def write_startup_log(web_url, config):
         with open(STARTUP_LOG_FILE, 'a', encoding='utf-8') as f:
             f.write('\n'.join(lines))
     except OSError:
-        # Logging should never block server startup.
         pass
 
 
-def build_mcp_tool_response(payload):
-    return {
-        'content': [{
-            'type': 'text',
-            'text': json.dumps(payload, ensure_ascii=True, indent=2)
-        }]
-    }
+# ---------------------------------------------------------------------------
+# Task file I/O
+# ---------------------------------------------------------------------------
 
+def parse_tasks(tasks_file=None):
+    """Parse tasks from running.md file."""
+    config = load_storage_config()
+    tasks_file = tasks_file or config['tasks_file']
+    tasks = []
+    if not os.path.exists(tasks_file):
+        return tasks
 
-def mcp_tools():
-    return [
-        {
-            'name': 'taskman.list_tasks',
-            'description': (
-                'List tasks with optional filters. '
-                'Filter by status (created, active, due, closed, deleted), category (exact match), '
-                'overdue (true = only tasks with due_date in the past and status not closed/deleted), '
-                'and/or priority (urgent, normal, low). Limit result size with limit (default 200, max 500).'
-            ),
-            'inputSchema': {
-                'type': 'object',
-                'properties': {
-                    'status': {'type': 'string', 'enum': ['created', 'active', 'due', 'closed', 'deleted']},
-                    'category': {'type': 'string'},
-                    'overdue': {'type': 'boolean', 'description': 'If true, only return tasks that are overdue (have due_date < today and are not closed/deleted).'},
-                    'priority': {'type': 'string', 'enum': ['urgent', 'normal', 'low']},
-                    'limit': {'type': 'integer', 'minimum': 1, 'maximum': 500}
+    with open(tasks_file, 'r', encoding='utf-8') as f:
+        lines = f.readlines()
+
+    current_task = None
+    task_id = 0
+    in_closing_remarks = False
+
+    for line in lines:
+        line = line.rstrip('\n')
+
+        if not line.strip() and current_task is None:
+            continue
+
+        match = TASK_PATTERN.match(line)
+        if match:
+            in_closing_remarks = False
+            if current_task:
+                tasks.append(current_task)
+            header, description = match.groups()
+            parts = header.split('|')
+            if len(parts) >= 3:
+                status = parts[0]
+                priority = parts[1]
+                date = parts[2]
+                due_date = None
+                categories_raw = None
+                if len(parts) >= 4:
+                    candidate = parts[3].strip()
+                    if candidate == '':
+                        if len(parts) >= 5:
+                            categories_raw = '|'.join(parts[4:])
+                    elif is_date(candidate):
+                        due_date = candidate
+                        if len(parts) >= 5:
+                            categories_raw = '|'.join(parts[4:])
+                    else:
+                        categories_raw = '|'.join(parts[3:])
+                current_task = {
+                    'id': task_id,
+                    'status': status,
+                    'priority': priority,
+                    'date': date,
+                    'due_date': due_date,
+                    'description': description,
+                    'categories': normalize_task_categories(categories_raw)
                 }
+                task_id += 1
+                continue
+
+        legacy_match = LEGACY_PATTERN.match(line)
+        if legacy_match:
+            in_closing_remarks = False
+            if current_task:
+                tasks.append(current_task)
+            status, description = legacy_match.groups()
+            current_task = {
+                'id': task_id,
+                'status': status,
+                'priority': 'normal',
+                'date': datetime.now().strftime('%Y-%m-%d'),
+                'due_date': None,
+                'description': description.strip(),
+                'categories': [DEFAULT_CATEGORY]
             }
-        },
-        {
-            'name': 'taskman.create_task',
-            'description': 'Create a new task.',
-            'inputSchema': {
-                'type': 'object',
-                'required': ['description'],
-                'properties': {
-                    'description': {'type': 'string'},
-                    'status': {'type': 'string', 'enum': ['created', 'active', 'due', 'closed', 'deleted']},
-                    'priority': {'type': 'string', 'enum': ['urgent', 'normal', 'low']},
-                    'due_date': {'type': 'string', 'description': 'YYYY-MM-DD'},
-                    'category': {'type': 'string'}
-                }
-            }
-        },
-        {
-            'name': 'taskman.set_task_status',
-            'description': 'Update status for an existing task.',
-            'inputSchema': {
-                'type': 'object',
-                'required': ['task_id', 'status'],
-                'properties': {
-                    'task_id': {'type': 'integer'},
-                    'status': {'type': 'string', 'enum': ['created', 'active', 'due', 'closed', 'deleted']}
-                }
-            }
-        },
-        {
-            'name': 'taskman.close_task',
-            'description': 'Close a task (set status to closed). Optionally provide closing_remarks to record why or how it was closed.',
-            'inputSchema': {
-                'type': 'object',
-                'required': ['task_id'],
-                'properties': {
-                    'task_id': {'type': 'integer'},
-                    'closing_remarks': {'type': 'string', 'description': 'Optional note or summary when closing the task.'}
-                }
-            }
-        },
-        {
-            'name': 'taskman.create_note',
-            'description': 'Create a new note file in the configured notes folder. Optionally set name and content; filepath can be used to place under a subpath of the notes folder.',
-            'inputSchema': {
-                'type': 'object',
-                'required': ['name'],
-                'properties': {
-                    'name': {'type': 'string', 'description': 'Note name (used for filename if filepath not set).'},
-                    'content': {'type': 'string', 'description': 'Initial note content.'},
-                    'filepath': {'type': 'string', 'description': 'Optional path relative to notes folder or absolute path inside notes folder.'}
-                }
-            }
-        }
-    ]
+            task_id += 1
+            continue
+
+        if line.startswith('    ') and current_task:
+            if line.startswith('    [closing_remarks] '):
+                in_closing_remarks = True
+                current_task['closing_remarks'] = line[22:]
+                continue
+            if in_closing_remarks:
+                current_task['closing_remarks'] += '\n' + line[4:]
+                continue
+            current_task['description'] += '\n' + line[4:]
+            continue
+
+        in_closing_remarks = False
+
+    if current_task:
+        tasks.append(current_task)
+
+    return tasks
 
 
-def mcp_list_tasks(arguments):
-    tasks = parse_tasks()
-    status = (arguments.get('status') or '').strip().lower()
-    category = normalize_category_name(arguments.get('category'))
-    overdue = normalize_bool(arguments.get('overdue'), False)
-    priority = (arguments.get('priority') or '').strip().lower()
-    limit = normalize_int(arguments.get('limit'), 200, minimum=1, maximum=500)
+def save_tasks(tasks, tasks_file=None):
+    """Save tasks to running.md file."""
+    config = load_storage_config()
+    tasks_file = tasks_file or config['tasks_file']
+    os.makedirs(os.path.dirname(tasks_file), exist_ok=True)
 
-    if status:
-        tasks = [t for t in tasks if (t.get('status') or '').lower() == status]
-    if category:
-        wanted = category.lower()
-        tasks = [
-            t for t in tasks
-            if any(normalize_category_name(cat).lower() == wanted for cat in (t.get('categories') or []))
-        ]
-    if overdue:
-        today = datetime.now().strftime('%Y-%m-%d')
-        tasks = [
-            t for t in tasks
-            if t.get('due_date') and t.get('due_date') < today
-            and (t.get('status') or '').lower() not in ('closed', 'deleted')
-        ]
-    if priority and priority in {'urgent', 'normal', 'low'}:
-        tasks = [t for t in tasks if (t.get('priority') or 'normal').lower() == priority]
-    tasks = tasks[:limit]
-    return build_mcp_tool_response({'tasks': tasks, 'count': len(tasks)})
-
-
-def mcp_create_task(arguments):
-    description = (arguments.get('description') or '').strip()
-    if not description:
-        raise ValueError('description is required')
-
-    status = (arguments.get('status') or 'created').strip().lower()
-    if status not in STATUS_OPTIONS:
-        raise ValueError(f'Invalid status: {status}')
-
-    priority = (arguments.get('priority') or 'normal').strip().lower()
-    if priority not in {'urgent', 'normal', 'low'}:
-        raise ValueError(f'Invalid priority: {priority}')
-
-    due_date = arguments.get('due_date')
-    if due_date:
-        due_date = due_date.strip()
-        if not is_date(due_date):
-            raise ValueError('due_date must use YYYY-MM-DD')
-
-    categories = load_categories()
-    chosen_category = normalize_category_name(arguments.get('category')) or get_default_category(categories)
-    if chosen_category.lower() not in {c.lower() for c in categories}:
-        categories.append(chosen_category)
-        categories = save_categories(categories)
-
-    tasks = parse_tasks()
-
-    new_task = {
-        'id': max([t['id'] for t in tasks], default=-1) + 1,
-        'status': status,
-        'priority': priority,
-        'date': datetime.now().strftime('%Y-%m-%d'),
-        'due_date': due_date,
-        'description': description,
-        'categories': normalize_task_categories([chosen_category], categories)
-    }
-    tasks.append(new_task)
-    save_tasks(tasks)
-    return build_mcp_tool_response({'task': new_task})
+    with open(tasks_file, 'w', encoding='utf-8') as f:
+        for task in tasks:
+            categories = normalize_task_categories(task.get('categories', []))
+            due_date = task.get('due_date')
+            if categories or due_date:
+                due_segment = due_date or ''
+                cat_segment = f"|{','.join(categories)}" if categories else ""
+                header = f"({task['status']}|{task['priority']}|{task['date']}|{due_segment}{cat_segment})"
+            else:
+                header = f"({task['status']}|{task['priority']}|{task['date']})"
+            f.write(f"{header} {task['description'].split(chr(10))[0]}\n")
+            desc_lines = task['description'].split('\n')
+            for extra_line in desc_lines[1:]:
+                f.write(f"    {extra_line}\n")
+            closing_remarks = task.get('closing_remarks') or ''
+            if closing_remarks:
+                rem_lines = closing_remarks.split('\n')
+                f.write(f"    [closing_remarks] {rem_lines[0]}\n")
+                for rem_line in rem_lines[1:]:
+                    f.write(f"    {rem_line}\n")
 
 
-def mcp_set_task_status(arguments):
-    task_id = arguments.get('task_id')
-    if not isinstance(task_id, int):
-        raise ValueError('task_id must be an integer')
-
-    status = (arguments.get('status') or '').strip().lower()
-    if status not in STATUS_OPTIONS:
-        raise ValueError(f'Invalid status: {status}')
-
-    tasks = parse_tasks()
-    target = next((t for t in tasks if t.get('id') == task_id), None)
-    if target is None:
-        raise ValueError('task not found')
-
-    target['status'] = status
-    save_tasks(tasks)
-    return build_mcp_tool_response({'task': target})
-
-
-def mcp_close_task(arguments):
-    task_id = arguments.get('task_id')
-    if not isinstance(task_id, int):
-        raise ValueError('task_id must be an integer')
-
-    closing_remarks = (arguments.get('closing_remarks') or '').strip()
-
-    tasks = parse_tasks()
-    target = next((t for t in tasks if t.get('id') == task_id), None)
-    if target is None:
-        raise ValueError('task not found')
-
-    target['status'] = 'closed'
-    if closing_remarks:
-        target['closing_remarks'] = closing_remarks
-    save_tasks(tasks)
-    return build_mcp_tool_response({'task': target})
-
+# ---------------------------------------------------------------------------
+# Note file I/O
+# ---------------------------------------------------------------------------
 
 def _create_note_internal(name, content='', filepath=None):
-    """Create a note file in the configured notes folder. Returns dict with filename, name, date, path."""
+    """Create a note file in the configured notes folder."""
     config = load_storage_config()
     topics_dir = config['topics_dir']
     safe_name = re.sub(r'[^\w\-]', '_', (name or 'untitled').strip()) or 'untitled'
@@ -671,221 +620,9 @@ def _create_note_internal(name, content='', filepath=None):
     }
 
 
-def mcp_create_note(arguments):
-    name = (arguments.get('name') or '').strip()
-    if not name:
-        raise ValueError('name is required')
-    content = (arguments.get('content') or '').strip()
-    filepath = (arguments.get('filepath') or '').strip() or None
-    try:
-        create_auto_snapshot_if_needed('topic-create')
-    except OSError as exc:
-        raise RuntimeError(f'Automatic snapshot failed: {exc}') from exc
-    topic = _create_note_internal(name=name, content=content, filepath=filepath)
-    return build_mcp_tool_response({'note': topic})
-
-
-def handle_mcp_request(payload):
-    method = payload.get('method')
-    request_id = payload.get('id')
-    params = payload.get('params') or {}
-
-    def ok(result):
-        if request_id is None:
-            return None
-        return {'jsonrpc': '2.0', 'id': request_id, 'result': result}
-
-    def err(code, message):
-        if request_id is None:
-            return None
-        return {'jsonrpc': '2.0', 'id': request_id, 'error': {'code': code, 'message': message}}
-
-    if method == 'initialize':
-        return ok({
-            'protocolVersion': MCP_PROTOCOL_VERSION,
-            'capabilities': {'tools': {}},
-            'serverInfo': {'name': MCP_SERVER_NAME, 'version': MCP_SERVER_VERSION}
-        })
-
-    if method == 'notifications/initialized':
-        return None
-
-    if method == 'ping':
-        return ok({})
-
-    if method == 'tools/list':
-        return ok({'tools': mcp_tools()})
-
-    if method == 'tools/call':
-        name = params.get('name')
-        arguments = params.get('arguments') or {}
-        try:
-            if name == 'taskman.list_tasks':
-                return ok(mcp_list_tasks(arguments))
-            if name == 'taskman.create_task':
-                return ok(mcp_create_task(arguments))
-            if name == 'taskman.set_task_status':
-                return ok(mcp_set_task_status(arguments))
-            if name == 'taskman.close_task':
-                return ok(mcp_close_task(arguments))
-            if name == 'taskman.create_note':
-                return ok(mcp_create_note(arguments))
-            return err(-32601, f'Unknown tool: {name}')
-        except (ValueError, RuntimeError) as exc:
-            return err(-32000, str(exc))
-
-    return err(-32601, f'Method not found: {method}')
-
-
-def current_web_url():
-    return request.host_url.rstrip('/')
-
-
-def resolve_topic_path(filename, topics_dir):
-    base = os.path.abspath(topics_dir)
-    candidate = os.path.abspath(os.path.join(base, filename))
-    try:
-        in_base = os.path.commonpath([base, candidate]) == base
-    except ValueError:
-        in_base = False
-    if not in_base:
-        raise ValueError('Invalid note path')
-    return candidate
-
-
-def parse_tasks(tasks_file=None):
-    """Parse tasks from running.md file."""
-    config = load_storage_config()
-    tasks_file = tasks_file or config['tasks_file']
-    tasks = []
-    if not os.path.exists(tasks_file):
-        return tasks
-
-    with open(tasks_file, 'r', encoding='utf-8') as f:
-        lines = f.readlines()
-
-    current_task = None
-    task_id = 0
-    in_closing_remarks = False
-
-    for line in lines:
-        line = line.rstrip('\n')
-
-        # Skip empty lines between tasks
-        if not line.strip() and current_task is None:
-            continue
-
-        # Try current format first
-        match = TASK_PATTERN.match(line)
-        if match:
-            in_closing_remarks = False
-            if current_task:
-                tasks.append(current_task)
-            header, description = match.groups()
-            parts = header.split('|')
-            if len(parts) >= 3:
-                status = parts[0]
-                priority = parts[1]
-                date = parts[2]
-                due_date = None
-                categories_raw = None
-                if len(parts) >= 4:
-                    candidate = parts[3].strip()
-                    # Header format supports an optional due date:
-                    # (status|priority|date|due|categories)
-                    # If due is intentionally blank and categories exist, header looks like:
-                    # (status|priority|date||categories)
-                    if candidate == '':
-                        if len(parts) >= 5:
-                            categories_raw = '|'.join(parts[4:])
-                    elif is_date(candidate):
-                        due_date = candidate
-                        if len(parts) >= 5:
-                            categories_raw = '|'.join(parts[4:])
-                    else:
-                        categories_raw = '|'.join(parts[3:])
-                current_task = {
-                    'id': task_id,
-                    'status': status,
-                    'priority': priority,
-                    'date': date,
-                    'due_date': due_date,
-                    'description': description,
-                    'categories': normalize_task_categories(categories_raw)
-                }
-                task_id += 1
-                continue
-
-        # Try legacy format
-        legacy_match = LEGACY_PATTERN.match(line)
-        if legacy_match:
-            in_closing_remarks = False
-            if current_task:
-                tasks.append(current_task)
-            status, description = legacy_match.groups()
-            current_task = {
-                'id': task_id,
-                'status': status,
-                'priority': 'normal',
-                'date': datetime.now().strftime('%Y-%m-%d'),
-                'due_date': None,
-                'description': description.strip(),
-                'categories': [DEFAULT_CATEGORY]
-            }
-            task_id += 1
-            continue
-
-        # Continuation line (indented)
-        if line.startswith('    ') and current_task:
-            if line.startswith('    [closing_remarks] '):
-                in_closing_remarks = True
-                # Prefix "    [closing_remarks] " is 22 chars
-                current_task['closing_remarks'] = line[22:]
-                continue
-            if in_closing_remarks:
-                current_task['closing_remarks'] += '\n' + line[4:]
-                continue
-            current_task['description'] += '\n' + line[4:]
-            continue
-
-        in_closing_remarks = False
-
-    if current_task:
-        tasks.append(current_task)
-
-    return tasks
-
-
-def save_tasks(tasks, tasks_file=None):
-    """Save tasks to running.md file."""
-    config = load_storage_config()
-    tasks_file = tasks_file or config['tasks_file']
-    os.makedirs(os.path.dirname(tasks_file), exist_ok=True)
-
-    with open(tasks_file, 'w', encoding='utf-8') as f:
-        for task in tasks:
-            categories = normalize_task_categories(task.get('categories', []))
-            due_date = task.get('due_date')
-            if categories or due_date:
-                due_segment = due_date or ''
-                cat_segment = f"|{','.join(categories)}" if categories else ""
-                header = f"({task['status']}|{task['priority']}|{task['date']}|{due_segment}{cat_segment})"
-            else:
-                header = f"({task['status']}|{task['priority']}|{task['date']})"
-            # Write main task line
-            f.write(f"{header} {task['description'].split(chr(10))[0]}\n")
-            # Write continuation lines if multi-line description
-            desc_lines = task['description'].split('\n')
-            for extra_line in desc_lines[1:]:
-                f.write(f"    {extra_line}\n")
-            # Write closing_remarks if present
-            closing_remarks = task.get('closing_remarks') or ''
-            if closing_remarks:
-                rem_lines = closing_remarks.split('\n')
-                f.write(f"    [closing_remarks] {rem_lines[0]}\n")
-                for rem_line in rem_lines[1:]:
-                    f.write(f"    {rem_line}\n")
-
+# ---------------------------------------------------------------------------
+# Snapshot helpers
+# ---------------------------------------------------------------------------
 
 def next_snapshot_id(root_dir, prefix='snapshot'):
     ts = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -1054,7 +791,6 @@ def restore_snapshot(snapshot_id, mode):
     if not os.path.isdir(snapshot_dir):
         raise FileNotFoundError('Snapshot not found')
 
-    # Safety snapshot of current state before restore.
     os.makedirs(snapshots_dir, exist_ok=True)
     backup_id = next_snapshot_id(snapshots_dir, prefix='pre_restore')
     write_snapshot(backup_id, mode='pre-restore', trigger='before-restore')
@@ -1082,13 +818,198 @@ def restore_snapshot(snapshot_id, mode):
             shutil.copy2(source_categories, CATEGORIES_FILE)
 
 
-# Serve index.html at root
+# ---------------------------------------------------------------------------
+# MCP tools (FastMCP)
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def list_tasks(
+    status: str | None = None,
+    category: str | None = None,
+    overdue: bool = False,
+    priority: str | None = None,
+    limit: int = 200,
+) -> dict:
+    """List tasks with optional filters.
+
+    Args:
+        status: Filter by status: created, active, due, closed, deleted.
+        category: Filter by category name (exact match).
+        overdue: If true, only return tasks with due_date in the past that are not closed/deleted.
+        priority: Filter by priority: urgent, normal, low.
+        limit: Max tasks to return (1-500, default 200).
+    """
+    tasks = parse_tasks()
+    limit = max(1, min(500, limit))
+
+    if status:
+        tasks = [t for t in tasks if (t.get('status') or '').lower() == status.strip().lower()]
+    if category:
+        wanted = normalize_category_name(category).lower()
+        tasks = [
+            t for t in tasks
+            if any(normalize_category_name(cat).lower() == wanted for cat in (t.get('categories') or []))
+        ]
+    if overdue:
+        today = datetime.now().strftime('%Y-%m-%d')
+        tasks = [
+            t for t in tasks
+            if t.get('due_date') and t['due_date'] < today
+            and (t.get('status') or '').lower() not in ('closed', 'deleted')
+        ]
+    if priority and priority.lower() in {'urgent', 'normal', 'low'}:
+        tasks = [t for t in tasks if (t.get('priority') or 'normal').lower() == priority.lower()]
+
+    tasks = tasks[:limit]
+    return {'tasks': tasks, 'count': len(tasks)}
+
+
+@mcp.tool()
+def create_task(
+    description: str,
+    status: str = 'created',
+    priority: str = 'normal',
+    due_date: str | None = None,
+    category: str | None = None,
+) -> dict:
+    """Create a new task.
+
+    Args:
+        description: Task description text.
+        status: Initial status: created, active, due, closed, deleted. Default: created.
+        priority: Priority: urgent, normal, low. Default: normal.
+        due_date: Optional due date in YYYY-MM-DD format.
+        category: Optional category name.
+    """
+    description = description.strip()
+    if not description:
+        raise ValueError('description is required')
+
+    status = status.strip().lower()
+    if status not in STATUS_OPTIONS:
+        raise ValueError(f'Invalid status: {status}')
+
+    priority = priority.strip().lower()
+    if priority not in {'urgent', 'normal', 'low'}:
+        raise ValueError(f'Invalid priority: {priority}')
+
+    if due_date:
+        due_date = due_date.strip()
+        if not is_date(due_date):
+            raise ValueError('due_date must use YYYY-MM-DD')
+
+    categories = load_categories()
+    chosen_category = normalize_category_name(category) if category else get_default_category(categories)
+    if chosen_category.lower() not in {c.lower() for c in categories}:
+        categories.append(chosen_category)
+        categories = save_categories(categories)
+
+    tasks = parse_tasks()
+    new_task = {
+        'id': max([t['id'] for t in tasks], default=-1) + 1,
+        'status': status,
+        'priority': priority,
+        'date': datetime.now().strftime('%Y-%m-%d'),
+        'due_date': due_date,
+        'description': description,
+        'categories': normalize_task_categories([chosen_category], categories),
+    }
+    tasks.append(new_task)
+    save_tasks(tasks)
+    return {'task': new_task}
+
+
+@mcp.tool()
+def set_task_status(task_id: int, status: str) -> dict:
+    """Update status for an existing task.
+
+    Args:
+        task_id: Integer task ID.
+        status: New status: created, active, due, closed, deleted.
+    """
+    status = status.strip().lower()
+    if status not in STATUS_OPTIONS:
+        raise ValueError(f'Invalid status: {status}')
+
+    tasks = parse_tasks()
+    target = next((t for t in tasks if t.get('id') == task_id), None)
+    if target is None:
+        raise ValueError('task not found')
+
+    target['status'] = status
+    save_tasks(tasks)
+    return {'task': target}
+
+
+@mcp.tool()
+def close_task(task_id: int, closing_remarks: str | None = None) -> dict:
+    """Close a task (set status to closed).
+
+    Args:
+        task_id: Integer task ID.
+        closing_remarks: Optional note or summary when closing the task.
+    """
+    tasks = parse_tasks()
+    target = next((t for t in tasks if t.get('id') == task_id), None)
+    if target is None:
+        raise ValueError('task not found')
+
+    target['status'] = 'closed'
+    if closing_remarks and closing_remarks.strip():
+        target['closing_remarks'] = closing_remarks.strip()
+    save_tasks(tasks)
+    return {'task': target}
+
+
+@mcp.tool()
+def create_note(
+    name: str,
+    content: str = '',
+    filepath: str | None = None,
+) -> dict:
+    """Create a new note file in the configured notes folder.
+
+    Args:
+        name: Note name (used for filename if filepath not set).
+        content: Initial note content.
+        filepath: Optional path relative to or absolute inside the notes folder.
+    """
+    name = name.strip()
+    if not name:
+        raise ValueError('name is required')
+    try:
+        create_auto_snapshot_if_needed('topic-create')
+    except OSError as exc:
+        raise RuntimeError(f'Automatic snapshot failed: {exc}') from exc
+    topic = _create_note_internal(name=name, content=content.strip(), filepath=filepath or None)
+    return {'note': topic}
+
+
+# ---------------------------------------------------------------------------
+# Flask web UI routes
+# ---------------------------------------------------------------------------
+
+def current_web_url():
+    return request.host_url.rstrip('/')
+
+
+def resolve_topic_path(filename, topics_dir):
+    base = os.path.abspath(topics_dir)
+    candidate = os.path.abspath(os.path.join(base, filename))
+    try:
+        in_base = os.path.commonpath([base, candidate]) == base
+    except ValueError:
+        in_base = False
+    if not in_base:
+        raise ValueError('Invalid note path')
+    return candidate
+
+
 @app.route('/')
 def index():
     return send_from_directory(app.static_folder, 'index.html')
 
 
-# API: Get storage config
 @app.route('/api/storage', methods=['GET'])
 def get_storage():
     return jsonify(load_storage_config())
@@ -1121,7 +1042,6 @@ def fs_native_picker():
         return jsonify({'error': f'Native picker failed: {exc}'}), 500
 
 
-# API: Update storage config
 @app.route('/api/storage', methods=['PUT'])
 def update_storage():
     data = request.json or {}
@@ -1154,13 +1074,11 @@ def update_storage():
     return jsonify(config)
 
 
-# API: List snapshots
 @app.route('/api/snapshots', methods=['GET'])
 def get_snapshots():
     return jsonify(list_snapshots())
 
 
-# API: Create snapshot
 @app.route('/api/snapshots', methods=['POST'])
 def create_snapshot():
     config = load_storage_config()
@@ -1172,7 +1090,6 @@ def create_snapshot():
     return jsonify(metadata), 201
 
 
-# API: Restore snapshot
 @app.route('/api/snapshots/<snapshot_id>/restore', methods=['POST'])
 def restore_snapshot_api(snapshot_id):
     data = request.json or {}
@@ -1190,7 +1107,6 @@ def restore_snapshot_api(snapshot_id):
     return jsonify({'success': True, 'id': snapshot_id, 'mode': mode})
 
 
-# API: Get all tasks
 @app.route('/api/tasks', methods=['GET'])
 def get_tasks():
     tasks = parse_tasks()
@@ -1208,22 +1124,6 @@ def get_categories():
 @app.route('/api/mcp-config', methods=['GET'])
 def get_mcp_config():
     return jsonify(mcp_server_config(current_web_url()))
-
-
-@app.route('/mcp', methods=['POST'])
-def mcp_http():
-    payload = request.get_json(silent=True)
-    if not isinstance(payload, dict):
-        return jsonify({
-            'jsonrpc': '2.0',
-            'id': None,
-            'error': {'code': -32700, 'message': 'Invalid JSON-RPC payload'}
-        }), 400
-
-    response = handle_mcp_request(payload)
-    if response is None:
-        return '', 204
-    return jsonify(response)
 
 
 @app.route('/api/categories', methods=['POST'])
@@ -1299,9 +1199,8 @@ def delete_category(category_name):
     return jsonify({'categories': categories})
 
 
-# API: Create new task
 @app.route('/api/tasks', methods=['POST'])
-def create_task():
+def create_task_api():
     data = request.json or {}
     tasks = parse_tasks()
     try:
@@ -1326,7 +1225,6 @@ def create_task():
     return jsonify(new_task), 201
 
 
-# API: Update task
 @app.route('/api/tasks/<int:task_id>', methods=['PUT'])
 def update_task(task_id):
     data = request.json or {}
@@ -1355,7 +1253,6 @@ def update_task(task_id):
     return jsonify({'error': 'Task not found'}), 404
 
 
-# API: Delete task
 @app.route('/api/tasks/<int:task_id>', methods=['DELETE'])
 def delete_task(task_id):
     tasks = parse_tasks()
@@ -1371,7 +1268,6 @@ def delete_task(task_id):
     return jsonify(target_task)
 
 
-# API: Get notes
 @app.route('/api/topics', methods=['GET'])
 def get_topics():
     config = load_storage_config()
@@ -1381,7 +1277,6 @@ def get_topics():
         for filename in os.listdir(topics_dir):
             if filename.endswith('.md') and not filename.startswith('.'):
                 filepath = os.path.join(topics_dir, filename)
-                # Extract date from filename (format: YYYY_M_D_name.md)
                 date_match = re.match(r'(\d{4}_\d{1,2}_\d{1,2})_(.+)\.md', filename)
                 if date_match:
                     date_str, name = date_match.groups()
@@ -1397,12 +1292,10 @@ def get_topics():
                     'path': filepath
                 })
 
-    # Sort by date descending
     topics.sort(key=lambda x: x['date'], reverse=True)
     return jsonify(topics)
 
 
-# API: Create open note
 @app.route('/api/topics', methods=['POST'])
 def create_topic():
     data = request.json or {}
@@ -1427,7 +1320,6 @@ def create_topic():
     return jsonify(topic), 201
 
 
-# API: Get note content
 @app.route('/api/topics/<path:filename>', methods=['GET', 'PUT'])
 def get_topic_content(filename):
     config = load_storage_config()
@@ -1455,13 +1347,27 @@ def get_topic_content(filename):
     return jsonify({'filename': filename, 'content': content})
 
 
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
 if __name__ == '__main__':
     web_url = 'http://localhost:5050'
     config = load_storage_config()
-    print(f"Task Manager running at {web_url}")
-    print(f"Tasks file: {config['tasks_file']}")
-    print(f"Notes: {config['topics_dir']}")
-    print(f"Recovery snapshots: {snapshot_root(config)}")
-    print(f"MCP server config: {json.dumps(mcp_server_config(web_url), ensure_ascii=True)}")
+
+    print(f"Task Manager web UI:  {web_url}")
+    print(f"MCP server:           http://localhost:{MCP_PORT}/mcp")
+    print(f"Tasks file:           {config['tasks_file']}")
+    print(f"Notes:                {config['topics_dir']}")
+    print(f"Recovery snapshots:   {snapshot_root(config)}")
     write_startup_log(web_url, config)
-    app.run(host='0.0.0.0', port=5050, debug=True)
+
+    # Run FastMCP (streamable-HTTP) in a background daemon thread
+    mcp_thread = threading.Thread(
+        target=lambda: mcp.run(transport='streamable-http'),
+        daemon=True,
+        name='mcp-server',
+    )
+    mcp_thread.start()
+
+    app.run(host='0.0.0.0', port=5050, debug=False, use_reloader=False)

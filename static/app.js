@@ -296,7 +296,8 @@ async function openMcpDialog() {
         const fallbackConfig = {
             mcpServers: {
                 'taskman-mcp': {
-                    url: `${window.location.origin}/mcp`
+                    url: `${window.location.origin}/mcp`,
+                    type: 'http'
                 }
             }
         };
