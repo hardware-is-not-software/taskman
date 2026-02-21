@@ -13,129 +13,229 @@
     <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-    <div class="container">
-        <header>
-            <div class="header-left">
-                <h1>Task Manager</h1>
-                <button id="btn-dark-mode" class="btn-icon" title="Toggle dark mode">
-                    <svg id="icon-sun" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <circle cx="12" cy="12" r="5"/>
-                        <line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/>
-                        <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
-                        <line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/>
-                        <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
-                    </svg>
-                    <svg id="icon-moon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="hidden">
-                        <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
-                    </svg>
-                </button>
+    <div class="app-shell">
+        <aside class="storage-panel">
+            <div class="storage-panel-header">
+                <h2>File Storage</h2>
+                <button id="btn-storage-toggle" type="button" class="storage-handle" title="Minimize storage panel" aria-label="Minimize storage panel">◀</button>
             </div>
-            <div class="header-actions">
-                <button id="btn-new-task" class="btn btn-primary">+ New Task</button>
-                <button id="btn-new-topic" class="btn btn-secondary">+ Open Topic</button>
-            </div>
-        </header>
-
-        <!-- Filters -->
-        <div class="filters">
-            <div class="filter-group">
-                <label>Status:</label>
-                <select id="filter-status">
-                    <option value="all">All</option>
-                    <option value="created">Created</option>
-                    <option value="active">Active</option>
-                    <option value="closed">Closed</option>
-                </select>
-            </div>
-            <div class="filter-group">
-                <label>Sort:</label>
-                <select id="sort-by">
-                    <option value="date-desc">Newest First</option>
-                    <option value="date-asc">Oldest First</option>
-                    <option value="priority">Priority</option>
-                </select>
-            </div>
-        </div>
-
-        <!-- Task List -->
-        <div id="task-list" class="task-list">
-            <!-- Tasks will be rendered here -->
-        </div>
-
-        <!-- New Task Modal -->
-        <div id="modal-task" class="modal hidden">
-            <div class="modal-content">
-                <div class="modal-header">
-                    <h2>New Task</h2>
-                    <button class="btn-close" data-close="modal-task">&times;</button>
-                </div>
-                <form id="form-task">
-                    <input type="hidden" id="task-id" value="">
+            <div class="storage-panel-content">
+                <p class="storage-help">Live files stay local. Recovery snapshots are written automatically to your configured folder (for example OneDrive, SharePoint sync folder, or iCloud Drive).</p>
+                <form id="form-storage" class="storage-form">
                     <div class="form-group">
-                        <label for="task-description">Description</label>
-                        <textarea id="task-description" rows="3" required placeholder="Task description..."></textarea>
+                        <label for="storage-tasks-file">Tasks file (local live file)</label>
+                        <div class="path-input-row">
+                            <input type="text" id="storage-tasks-file" required>
+                            <button type="button" class="btn btn-secondary btn-small btn-native-picker" data-native-target="storage-tasks-file" data-native-mode="save_file">System…</button>
+                        </div>
                     </div>
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label for="task-status">Status</label>
-                            <select id="task-status">
-                                <option value="created">Created</option>
-                                <option value="active">Active</option>
-                                <option value="closed">Closed</option>
-                            </select>
+                    <div class="form-group">
+                        <label for="storage-topics-dir">Open topics folder (local live files)</label>
+                        <div class="path-input-row">
+                            <input type="text" id="storage-topics-dir" required>
+                            <button type="button" class="btn btn-secondary btn-small btn-native-picker" data-native-target="storage-topics-dir" data-native-mode="dir">System…</button>
                         </div>
-                        <div class="form-group">
-                            <label for="task-priority">Priority</label>
-                            <select id="task-priority">
-                                <option value="urgent">Urgent</option>
-                                <option value="normal" selected>Normal</option>
-                                <option value="low">Low</option>
-                            </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="storage-provider">Recovery provider</label>
+                        <select id="storage-provider">
+                            <option value="local">Local folder</option>
+                            <option value="onedrive">OneDrive</option>
+                            <option value="sharepoint">SharePoint drive</option>
+                            <option value="icloud">iCloud Drive</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="storage-recovery-dir">Recovery snapshot folder</label>
+                        <div class="path-input-row">
+                            <input type="text" id="storage-recovery-dir" required placeholder="/path/to/OneDrive/TaskRecovery">
+                            <button type="button" class="btn btn-secondary btn-small btn-native-picker" data-native-target="storage-recovery-dir" data-native-mode="dir">System…</button>
                         </div>
+                    </div>
+                    <div class="form-group form-group-inline">
+                        <label for="storage-auto-snapshot">Auto snapshot before changes</label>
+                        <input type="checkbox" id="storage-auto-snapshot" checked>
+                    </div>
+                    <div class="form-group">
+                        <label for="storage-auto-interval">Minimum seconds between auto snapshots</label>
+                        <input type="number" id="storage-auto-interval" min="0" step="1" value="30">
+                    </div>
+                    <div class="form-group">
+                        <label for="storage-retention-count">Keep latest snapshots</label>
+                        <input type="number" id="storage-retention-count" min="10" step="1" value="200">
                     </div>
                     <div class="form-actions">
-                        <button type="button" class="btn btn-secondary" data-close="modal-task">Cancel</button>
-                        <button type="submit" class="btn btn-primary">Save Task</button>
+                        <button type="submit" class="btn btn-primary">Save Storage Settings</button>
                     </div>
                 </form>
-            </div>
-        </div>
+                <p id="storage-message" class="storage-message"></p>
 
-        <!-- New Topic Modal -->
-        <div id="modal-topic" class="modal hidden">
-            <div class="modal-content">
-                <div class="modal-header">
-                    <h2>Create Open Topic</h2>
-                    <button class="btn-close" data-close="modal-topic">&times;</button>
+                <div class="snapshot-section">
+                    <div class="snapshot-header">
+                        <h3>Snapshots</h3>
+                        <button id="btn-create-snapshot" type="button" class="btn btn-secondary btn-small">Create Snapshot</button>
+                    </div>
+                    <p class="storage-help">Use "Revert Tasks" for quick rollback, or "Full Recovery" to restore tasks and topics.</p>
+                    <div id="snapshot-list" class="snapshot-list"></div>
                 </div>
-                <form id="form-topic">
-                    <div class="form-group">
-                        <label for="topic-name">Topic Name (filename)</label>
-                        <div class="input-prefix">
-                            <span id="topic-date-prefix"></span>
-                            <input type="text" id="topic-name" required placeholder="topic_name">
-                            <span>.md</span>
+            </div>
+        </aside>
+        <div class="container">
+            <header>
+                <div class="header-left">
+                    <h1>Task Manager</h1>
+                    <button id="btn-dark-mode" class="btn-icon" title="Toggle dark mode">
+                        <svg id="icon-sun" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="12" cy="12" r="5"/>
+                            <line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/>
+                            <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
+                            <line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/>
+                            <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+                        </svg>
+                        <svg id="icon-moon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="hidden">
+                            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+                        </svg>
+                    </button>
+                </div>
+                <div class="header-actions">
+                    <button id="btn-new-task" class="btn btn-primary">+ New Task</button>
+                    <button id="btn-new-topic" class="btn btn-secondary">+ Open Topic</button>
+                </div>
+            </header>
+
+            <!-- Filters -->
+            <div class="filters">
+                <div class="filter-group">
+                    <label>Status:</label>
+                    <div id="status-filters" class="status-filters"></div>
+                </div>
+                <div class="filter-group">
+                    <label>Sort:</label>
+                    <select id="sort-by">
+                        <option value="date-desc">Newest First</option>
+                        <option value="date-asc">Oldest First</option>
+                        <option value="priority">Priority</option>
+                    </select>
+                </div>
+            </div>
+            <!-- Task List -->
+            <div id="task-list" class="task-list">
+                <!-- Tasks will be rendered here -->
+            </div>
+
+            <!-- New Task Modal -->
+            <div id="modal-task" class="modal hidden">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h2>New Task</h2>
+                        <button class="btn-close" data-close="modal-task">&times;</button>
+                    </div>
+                    <form id="form-task">
+                        <input type="hidden" id="task-id" value="">
+                        <div class="form-group">
+                            <label for="task-description">Description</label>
+                            <textarea id="task-description" rows="3" required placeholder="Task description..."></textarea>
                         </div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="task-status">Status</label>
+                                <select id="task-status">
+                                    <option value="created">Created</option>
+                                    <option value="active">Active</option>
+                                    <option value="due">Due</option>
+                                    <option value="closed">Closed</option>
+                                    <option value="deleted">Deleted</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label for="task-priority">Priority</label>
+                                <select id="task-priority">
+                                    <option value="urgent">Urgent</option>
+                                    <option value="normal" selected>Normal</option>
+                                    <option value="low">Low</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label for="task-due-date">Due Date</label>
+                            <input type="date" id="task-due-date">
+                        </div>
+                        <div class="form-actions">
+                            <button type="button" class="btn btn-secondary" data-close="modal-task">Cancel</button>
+                            <button type="submit" class="btn btn-primary">Save Task</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+
+            <!-- New Topic Modal -->
+            <div id="modal-topic" class="modal hidden">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h2>Create Open Topic</h2>
+                        <button class="btn-close" data-close="modal-topic">&times;</button>
                     </div>
-                    <div class="form-group">
-                        <label for="topic-content">Initial Content (optional)</label>
-                        <textarea id="topic-content" rows="5" placeholder="Initial notes..."></textarea>
+                    <form id="form-topic">
+                        <div class="form-group">
+                            <label for="topic-path">Topic File Path (optional)</label>
+                            <div class="path-input-row">
+                                <input type="text" id="topic-path" placeholder="Auto-generated in topics folder if empty">
+                                <button type="button" class="btn btn-secondary btn-small btn-native-picker" data-native-target="topic-path" data-native-mode="save_file">System…</button>
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label for="topic-name">Topic Name (filename)</label>
+                            <div class="input-prefix">
+                                <span id="topic-date-prefix"></span>
+                                <input type="text" id="topic-name" required placeholder="topic_name">
+                                <span>.md</span>
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label for="topic-content">Initial Content (optional)</label>
+                            <textarea id="topic-content" rows="5" placeholder="Initial notes..."></textarea>
+                        </div>
+                        <div class="form-actions">
+                            <button type="button" class="btn btn-secondary" data-close="modal-topic">Cancel</button>
+                            <button type="submit" class="btn btn-primary">Create Topic</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+
+            <!-- Topics Section (collapsible) -->
+            <details class="topics-section">
+                <summary>Open Topics</summary>
+                <div id="topic-list" class="topic-list">
+                    <!-- Topics will be rendered here -->
+                </div>
+            </details>
+
+            <!-- Edit Topic Modal -->
+            <div id="modal-topic-edit" class="modal hidden">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h2 id="topic-edit-modal-title">Edit Topic</h2>
+                        <button class="btn-close" data-close="modal-topic-edit">&times;</button>
                     </div>
-                    <div class="form-actions">
-                        <button type="button" class="btn btn-secondary" data-close="modal-topic">Cancel</button>
-                        <button type="submit" class="btn btn-primary">Create Topic</button>
-                    </div>
-                </form>
+                    <form id="form-topic-edit">
+                        <input type="hidden" id="topic-edit-filename">
+                        <div class="form-group">
+                            <label for="topic-edit-name">Filename</label>
+                            <input type="text" id="topic-edit-name" readonly>
+                        </div>
+                        <div class="form-group">
+                            <label for="topic-edit-content">Content</label>
+                            <textarea id="topic-edit-content" rows="12" required></textarea>
+                        </div>
+                        <div class="form-actions">
+                            <button type="button" class="btn btn-secondary" data-close="modal-topic-edit">Cancel</button>
+                            <button id="btn-topic-save" type="submit" class="btn btn-primary">Save Topic</button>
+                        </div>
+                    </form>
+                </div>
             </div>
         </div>
-
-        <!-- Topics Section (collapsible) -->
-        <details class="topics-section">
-            <summary>Open Topics</summary>
-            <div id="topic-list" class="topic-list">
-                <!-- Topics will be rendered here -->
-            </div>
-        </details>
     </div>
 
     <script src="/app.js"></script>

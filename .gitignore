@@ -7,10 +7,12 @@
 
 # Task data folders (contain work items)
 tasks/
-open/
-closed/
-completed/
-progress in control/
+topics/
+recovery/
+
+# Storage config
+storage_config.json
+
 
 # Any markdown files in root (might contain notes) - except README
 /*.md
@@ -23,6 +25,7 @@ progress in control/
 *.key
 credentials.*
 secrets.*
+.codex
 
 # ===================
 # Standard ignores

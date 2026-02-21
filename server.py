@@ -1,62 +1,379 @@
 #!/usr/bin/env python3
 """
 Task Manager - Flask API Server
-Manages tasks in tasks/running.md and open topic files in open/
+Manages tasks in markdown and topic files with configurable storage and snapshots.
 """
 
 from flask import Flask, jsonify, request, send_from_directory
 from datetime import datetime
+import json
 import os
 import re
+import shutil
+import subprocess
+import sys
 
 app = Flask(__name__, static_folder='static', static_url_path='')
 
 # Paths
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-TASKS_FILE = os.path.join(BASE_DIR, 'tasks', 'runnning.md')
-OPEN_DIR = os.path.join(BASE_DIR, 'open')
+DEFAULT_TASKS_FILE = os.path.join(BASE_DIR, 'tasks', 'runnning.md')
+DEFAULT_TOPICS_DIR = os.path.join(BASE_DIR, 'topics')
+DEFAULT_RECOVERY_DIR = os.path.join(BASE_DIR, 'recovery')
+STORAGE_CONFIG_FILE = os.path.join(BASE_DIR, 'storage_config.json')
+LEGACY_STORAGE_CONFIG_FILE = os.path.join(BASE_DIR, 'tasks', 'storage_config.json')
+ALLOWED_PROVIDERS = {'local', 'onedrive', 'sharepoint', 'icloud'}
+SNAPSHOT_NAME_PATTERN = re.compile(r'^[A-Za-z0-9_-]+$')
 
-# Task format regex: (status|priority|date) description
-TASK_PATTERN = re.compile(r'^\((\w+)\|(\w+)\|(\d{4}-\d{2}-\d{2})\)\s+(.+)$')
+# Task format regex: (status|priority|date|due|categories) description
+TASK_PATTERN = re.compile(r'^\(([^)]+)\)\s+(.+)$')
 # Legacy format: (status)   description
 LEGACY_PATTERN = re.compile(r'^\((\w+)\)\s+(.+)$')
 
 
-def parse_tasks():
+def normalize_path(value):
+    if not isinstance(value, str):
+        return ''
+    trimmed = value.strip()
+    if not trimmed:
+        return ''
+    return os.path.abspath(os.path.expanduser(trimmed))
+
+
+def default_browse_path():
+    return os.path.expanduser('~')
+
+
+def nearest_existing_directory(path_value):
+    if not path_value:
+        return default_browse_path()
+
+    current = normalize_path(path_value)
+    if not current:
+        return default_browse_path()
+
+    if os.path.isdir(current):
+        return current
+    if os.path.isfile(current):
+        return os.path.dirname(current)
+
+    probe = current
+    while True:
+        parent = os.path.dirname(probe)
+        if os.path.exists(probe):
+            return probe if os.path.isdir(probe) else os.path.dirname(probe)
+        if parent == probe:
+            return default_browse_path()
+        probe = parent
+
+
+def normalize_provider(value):
+    provider = (value or 'local').strip().lower()
+    return provider if provider in ALLOWED_PROVIDERS else 'local'
+
+
+def normalize_bool(value, default=True):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {'true', '1', 'yes', 'on'}:
+            return True
+        if lowered in {'false', '0', 'no', 'off'}:
+            return False
+    return default
+
+
+def normalize_int(value, default, minimum=None, maximum=None):
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    if minimum is not None:
+        parsed = max(minimum, parsed)
+    if maximum is not None:
+        parsed = min(maximum, parsed)
+    return parsed
+
+
+def default_storage_config():
+    return {
+        'tasks_file': DEFAULT_TASKS_FILE,
+        'topics_dir': DEFAULT_TOPICS_DIR,
+        'recovery_provider': 'local',
+        'recovery_dir': DEFAULT_RECOVERY_DIR,
+        'auto_snapshot_enabled': True,
+        'auto_snapshot_interval_seconds': 30,
+        'snapshot_retention_count': 200,
+    }
+
+
+def normalized_storage_config(data):
+    defaults = default_storage_config()
+    config = {
+        'tasks_file': normalize_path(data.get('tasks_file')) or defaults['tasks_file'],
+        'topics_dir': normalize_path(data.get('topics_dir')) or defaults['topics_dir'],
+        'recovery_provider': normalize_provider(data.get('recovery_provider')),
+        'recovery_dir': normalize_path(data.get('recovery_dir')) or defaults['recovery_dir'],
+        'auto_snapshot_enabled': normalize_bool(
+            data.get('auto_snapshot_enabled'),
+            defaults['auto_snapshot_enabled']
+        ),
+        'auto_snapshot_interval_seconds': normalize_int(
+            data.get('auto_snapshot_interval_seconds'),
+            defaults['auto_snapshot_interval_seconds'],
+            minimum=0,
+            maximum=86400
+        ),
+        'snapshot_retention_count': normalize_int(
+            data.get('snapshot_retention_count'),
+            defaults['snapshot_retention_count'],
+            minimum=10,
+            maximum=5000
+        ),
+    }
+    return config
+
+
+def load_storage_config():
+    defaults = default_storage_config()
+    config_path = STORAGE_CONFIG_FILE
+
+    # First startup path: create default storage config and targets.
+    if not os.path.exists(config_path) and not os.path.exists(LEGACY_STORAGE_CONFIG_FILE):
+        config = normalized_storage_config(defaults)
+        try:
+            ensure_storage_targets(config)
+            save_storage_config(config)
+        except OSError:
+            # Best effort initialization; still return defaults for UI/API.
+            pass
+        return config
+
+    # Backward compatibility: read legacy config if needed and migrate to root config.
+    if not os.path.exists(config_path) and os.path.exists(LEGACY_STORAGE_CONFIG_FILE):
+        config_path = LEGACY_STORAGE_CONFIG_FILE
+
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            raw = json.load(f)
+        if not isinstance(raw, dict):
+            return normalized_storage_config(defaults)
+        config = normalized_storage_config(raw)
+        if config_path == LEGACY_STORAGE_CONFIG_FILE:
+            try:
+                save_storage_config(config)
+            except OSError:
+                pass
+        return config
+    except (OSError, ValueError):
+        return normalized_storage_config(defaults)
+
+
+def save_storage_config(config):
+    os.makedirs(os.path.dirname(STORAGE_CONFIG_FILE), exist_ok=True)
+    with open(STORAGE_CONFIG_FILE, 'w', encoding='utf-8') as f:
+        json.dump(config, f, indent=2)
+
+
+def ensure_storage_targets(config):
+    os.makedirs(os.path.dirname(config['tasks_file']), exist_ok=True)
+    os.makedirs(config['topics_dir'], exist_ok=True)
+    os.makedirs(config['recovery_dir'], exist_ok=True)
+    if not os.path.exists(config['tasks_file']):
+        with open(config['tasks_file'], 'w', encoding='utf-8') as f:
+            f.write('')
+
+
+def snapshot_root(config):
+    return os.path.join(config['recovery_dir'], 'snapshots')
+
+
+def list_fs_entries(path_value, mode):
+    browse_mode = mode if mode in {'file', 'dir'} else 'dir'
+    current_path = nearest_existing_directory(path_value)
+    if not os.path.isdir(current_path):
+        raise NotADirectoryError('Path is not a directory')
+
+    entries = []
+    try:
+        with os.scandir(current_path) as it:
+            for entry in it:
+                name = entry.name
+                if name in {'.', '..'}:
+                    continue
+                entry_path = os.path.abspath(entry.path)
+                if entry.is_dir(follow_symlinks=False):
+                    entries.append({
+                        'name': name,
+                        'path': entry_path,
+                        'type': 'dir',
+                    })
+                elif browse_mode == 'file' and entry.is_file(follow_symlinks=False):
+                    entries.append({
+                        'name': name,
+                        'path': entry_path,
+                        'type': 'file',
+                    })
+    except PermissionError:
+        raise PermissionError('Permission denied for this path')
+
+    entries.sort(key=lambda item: (item['type'] != 'dir', item['name'].lower()))
+    parent_path = os.path.dirname(current_path) if os.path.dirname(current_path) != current_path else ''
+    return {
+        'current_path': current_path,
+        'parent_path': parent_path,
+        'entries': entries,
+        'mode': browse_mode
+    }
+
+
+def native_pick_path(mode, initial_path):
+    picker_mode = mode if mode in {'dir', 'file', 'save_file'} else 'dir'
+    if sys.platform != 'darwin':
+        raise RuntimeError('System picker currently supported on macOS only')
+
+    start_dir = nearest_existing_directory(initial_path)
+    initial_name = 'runnning.md'
+    if initial_path:
+        normalized = normalize_path(initial_path)
+        if normalized and not os.path.isdir(normalized):
+            initial_name = os.path.basename(normalized) or initial_name
+
+    if picker_mode == 'dir':
+        script = (
+            'set startFolder to POSIX file "{}"\n'
+            'POSIX path of (choose folder with prompt "Select folder" default location startFolder)'
+        ).format(start_dir.replace('"', '\\"'))
+    elif picker_mode == 'file':
+        script = (
+            'set startFolder to POSIX file "{}"\n'
+            'POSIX path of (choose file with prompt "Select file" default location startFolder)'
+        ).format(start_dir.replace('"', '\\"'))
+    else:
+        script = (
+            'set startFolder to POSIX file "{}"\n'
+            'POSIX path of (choose file name with prompt "Select file location" '
+            'default location startFolder default name "{}")'
+        ).format(
+            start_dir.replace('"', '\\"'),
+            initial_name.replace('"', '\\"')
+        )
+
+    result = subprocess.run(
+        ['osascript', '-e', script],
+        capture_output=True,
+        text=True
+    )
+
+    if result.returncode != 0:
+        # AppleScript -128 means user canceled.
+        if '(-128)' in (result.stderr or ''):
+            return {'cancelled': True, 'path': ''}
+        raise RuntimeError((result.stderr or 'System picker failed').strip())
+
+    selected = (result.stdout or '').strip()
+    if not selected:
+        return {'cancelled': True, 'path': ''}
+    return {'cancelled': False, 'path': normalize_path(selected)}
+
+
+def normalize_categories(value):
+    if not value:
+        return []
+    if isinstance(value, str):
+        items = value.split(',')
+    elif isinstance(value, list):
+        items = value
+    else:
+        return []
+    cleaned = []
+    seen = set()
+    for item in items:
+        if not isinstance(item, str):
+            continue
+        name = item.strip()
+        if not name:
+            continue
+        name = re.sub(r'[|()]+', '-', name)
+        key = name.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(name)
+    return cleaned
+
+
+def is_date(value):
+    return bool(re.match(r'^\d{4}-\d{2}-\d{2}$', value))
+
+
+def resolve_topic_path(filename, topics_dir):
+    base = os.path.abspath(topics_dir)
+    candidate = os.path.abspath(os.path.join(base, filename))
+    try:
+        in_base = os.path.commonpath([base, candidate]) == base
+    except ValueError:
+        in_base = False
+    if not in_base:
+        raise ValueError('Invalid topic path')
+    return candidate
+
+
+def parse_tasks(tasks_file=None):
     """Parse tasks from running.md file."""
+    config = load_storage_config()
+    tasks_file = tasks_file or config['tasks_file']
     tasks = []
-    if not os.path.exists(TASKS_FILE):
+    if not os.path.exists(tasks_file):
         return tasks
-    
-    with open(TASKS_FILE, 'r', encoding='utf-8') as f:
+
+    with open(tasks_file, 'r', encoding='utf-8') as f:
         lines = f.readlines()
-    
+
     current_task = None
     task_id = 0
-    
+
     for line in lines:
         line = line.rstrip('\n')
-        
+
         # Skip empty lines between tasks
         if not line.strip() and current_task is None:
             continue
-        
-        # Try new format first
+
+        # Try current format first
         match = TASK_PATTERN.match(line)
         if match:
             if current_task:
                 tasks.append(current_task)
-            status, priority, date, description = match.groups()
-            current_task = {
-                'id': task_id,
-                'status': status,
-                'priority': priority,
-                'date': date,
-                'description': description
-            }
-            task_id += 1
-            continue
-        
+            header, description = match.groups()
+            parts = header.split('|')
+            if len(parts) >= 3:
+                status = parts[0]
+                priority = parts[1]
+                date = parts[2]
+                due_date = None
+                categories_raw = None
+                if len(parts) >= 4:
+                    candidate = parts[3].strip()
+                    if is_date(candidate):
+                        due_date = candidate
+                        if len(parts) >= 5:
+                            categories_raw = '|'.join(parts[4:])
+                    else:
+                        categories_raw = '|'.join(parts[3:])
+                current_task = {
+                    'id': task_id,
+                    'status': status,
+                    'priority': priority,
+                    'date': date,
+                    'due_date': due_date,
+                    'description': description,
+                    'categories': normalize_categories(categories_raw)
+                }
+                task_id += 1
+                continue
+
         # Try legacy format
         legacy_match = LEGACY_PATTERN.match(line)
         if legacy_match:
@@ -68,40 +385,337 @@ def parse_tasks():
                 'status': status,
                 'priority': 'normal',
                 'date': datetime.now().strftime('%Y-%m-%d'),
-                'description': description.strip()
+                'due_date': None,
+                'description': description.strip(),
+                'categories': []
             }
             task_id += 1
             continue
-        
+
         # Continuation line (indented)
         if line.startswith('    ') and current_task:
             current_task['description'] += '\n' + line[4:]
             continue
-    
+
     if current_task:
         tasks.append(current_task)
-    
+
     return tasks
 
 
-def save_tasks(tasks):
+def save_tasks(tasks, tasks_file=None):
     """Save tasks to running.md file."""
-    os.makedirs(os.path.dirname(TASKS_FILE), exist_ok=True)
-    
-    with open(TASKS_FILE, 'w', encoding='utf-8') as f:
+    config = load_storage_config()
+    tasks_file = tasks_file or config['tasks_file']
+    os.makedirs(os.path.dirname(tasks_file), exist_ok=True)
+
+    with open(tasks_file, 'w', encoding='utf-8') as f:
         for task in tasks:
+            categories = normalize_categories(task.get('categories', []))
+            due_date = task.get('due_date')
+            if categories or due_date:
+                due_segment = due_date or ''
+                cat_segment = f"|{','.join(categories)}" if categories else ""
+                header = f"({task['status']}|{task['priority']}|{task['date']}|{due_segment}{cat_segment})"
+            else:
+                header = f"({task['status']}|{task['priority']}|{task['date']})"
             # Write main task line
-            f.write(f"({task['status']}|{task['priority']}|{task['date']}) {task['description'].split(chr(10))[0]}\n")
+            f.write(f"{header} {task['description'].split(chr(10))[0]}\n")
             # Write continuation lines if multi-line description
             desc_lines = task['description'].split('\n')
             for extra_line in desc_lines[1:]:
                 f.write(f"    {extra_line}\n")
 
 
+def next_snapshot_id(root_dir, prefix='snapshot'):
+    ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+    candidate = f"{prefix}_{ts}"
+    path = os.path.join(root_dir, candidate)
+    if not os.path.exists(path):
+        return candidate
+
+    suffix = 1
+    while True:
+        candidate = f"{prefix}_{ts}_{suffix}"
+        path = os.path.join(root_dir, candidate)
+        if not os.path.exists(path):
+            return candidate
+        suffix += 1
+
+
+def parse_iso_datetime(value):
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def enforce_snapshot_retention(config, snapshots_dir):
+    retain = config.get('snapshot_retention_count', 200)
+    entries = []
+    for name in os.listdir(snapshots_dir):
+        path = os.path.join(snapshots_dir, name)
+        if not os.path.isdir(path):
+            continue
+        entries.append((os.path.getmtime(path), path))
+    entries.sort(key=lambda item: item[0], reverse=True)
+    for _, stale_path in entries[retain:]:
+        shutil.rmtree(stale_path, ignore_errors=True)
+
+
+def should_create_auto_snapshot(config, snapshots_dir):
+    if not config.get('auto_snapshot_enabled', True):
+        return False
+    min_interval = config.get('auto_snapshot_interval_seconds', 30)
+    if min_interval <= 0:
+        return True
+
+    latest_auto = None
+    for name in os.listdir(snapshots_dir):
+        metadata_file = os.path.join(snapshots_dir, name, 'metadata.json')
+        if not os.path.exists(metadata_file):
+            continue
+        try:
+            with open(metadata_file, 'r', encoding='utf-8') as f:
+                metadata = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if metadata.get('mode') != 'auto':
+            continue
+        created_at = parse_iso_datetime(metadata.get('created_at'))
+        if created_at and (latest_auto is None or created_at > latest_auto):
+            latest_auto = created_at
+
+    if latest_auto is None:
+        return True
+
+    return (datetime.now() - latest_auto).total_seconds() >= min_interval
+
+
+def write_snapshot(snapshot_id, mode='manual', trigger='manual'):
+    config = load_storage_config()
+    snapshots_dir = snapshot_root(config)
+    os.makedirs(snapshots_dir, exist_ok=True)
+
+    snapshot_dir = os.path.join(snapshots_dir, snapshot_id)
+    os.makedirs(snapshot_dir, exist_ok=False)
+
+    tasks_file = config['tasks_file']
+    topics_dir = config['topics_dir']
+
+    if os.path.exists(tasks_file):
+        shutil.copy2(tasks_file, os.path.join(snapshot_dir, 'runnning.md'))
+
+    topics_snapshot_dir = os.path.join(snapshot_dir, 'open')
+    if os.path.isdir(topics_dir):
+        shutil.copytree(topics_dir, topics_snapshot_dir)
+    else:
+        os.makedirs(topics_snapshot_dir, exist_ok=True)
+
+    metadata = {
+        'id': snapshot_id,
+        'created_at': datetime.now().isoformat(),
+        'mode': mode,
+        'trigger': trigger,
+        'provider': config['recovery_provider'],
+        'recovery_dir': config['recovery_dir'],
+        'tasks_file': tasks_file,
+        'topics_dir': topics_dir,
+    }
+    with open(os.path.join(snapshot_dir, 'metadata.json'), 'w', encoding='utf-8') as f:
+        json.dump(metadata, f, indent=2)
+
+    enforce_snapshot_retention(config, snapshots_dir)
+    return metadata
+
+
+def list_snapshots():
+    config = load_storage_config()
+    snapshots_dir = snapshot_root(config)
+    if not os.path.isdir(snapshots_dir):
+        return []
+
+    results = []
+    for name in os.listdir(snapshots_dir):
+        snap_dir = os.path.join(snapshots_dir, name)
+        if not os.path.isdir(snap_dir):
+            continue
+
+        metadata_file = os.path.join(snap_dir, 'metadata.json')
+        metadata = {
+            'id': name,
+            'created_at': datetime.fromtimestamp(os.path.getmtime(snap_dir)).isoformat(),
+            'mode': 'unknown',
+            'provider': config['recovery_provider'],
+            'recovery_dir': config['recovery_dir'],
+        }
+        if os.path.exists(metadata_file):
+            try:
+                with open(metadata_file, 'r', encoding='utf-8') as f:
+                    loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    metadata.update(loaded)
+            except (OSError, ValueError):
+                pass
+        results.append(metadata)
+
+    results.sort(key=lambda s: s.get('created_at', ''), reverse=True)
+    return results
+
+
+def create_auto_snapshot_if_needed(trigger):
+    config = load_storage_config()
+    snapshots_dir = snapshot_root(config)
+    os.makedirs(snapshots_dir, exist_ok=True)
+    if not should_create_auto_snapshot(config, snapshots_dir):
+        return None
+    snapshot_id = next_snapshot_id(snapshots_dir, prefix='auto')
+    return write_snapshot(snapshot_id, mode='auto', trigger=trigger)
+
+
+def restore_snapshot(snapshot_id, mode):
+    if not SNAPSHOT_NAME_PATTERN.match(snapshot_id):
+        raise ValueError('Invalid snapshot id')
+
+    if mode not in {'revert', 'full'}:
+        raise ValueError('Invalid restore mode')
+
+    config = load_storage_config()
+    snapshots_dir = snapshot_root(config)
+    snapshot_dir = os.path.join(snapshots_dir, snapshot_id)
+    if not os.path.isdir(snapshot_dir):
+        raise FileNotFoundError('Snapshot not found')
+
+    # Safety snapshot of current state before restore.
+    os.makedirs(snapshots_dir, exist_ok=True)
+    backup_id = next_snapshot_id(snapshots_dir, prefix='pre_restore')
+    write_snapshot(backup_id, mode='pre-restore', trigger='before-restore')
+
+    source_tasks = os.path.join(snapshot_dir, 'runnning.md')
+    source_topics = os.path.join(snapshot_dir, 'open')
+
+    if os.path.exists(source_tasks):
+        os.makedirs(os.path.dirname(config['tasks_file']), exist_ok=True)
+        shutil.copy2(source_tasks, config['tasks_file'])
+
+    if mode == 'full':
+        if os.path.isdir(config['topics_dir']):
+            shutil.rmtree(config['topics_dir'])
+        os.makedirs(os.path.dirname(config['topics_dir']), exist_ok=True)
+        if os.path.isdir(source_topics):
+            shutil.copytree(source_topics, config['topics_dir'])
+        else:
+            os.makedirs(config['topics_dir'], exist_ok=True)
+
+
 # Serve index.html at root
 @app.route('/')
 def index():
     return send_from_directory(app.static_folder, 'index.html')
+
+
+# API: Get storage config
+@app.route('/api/storage', methods=['GET'])
+def get_storage():
+    return jsonify(load_storage_config())
+
+
+@app.route('/api/fs/list', methods=['GET'])
+def fs_list():
+    path_value = request.args.get('path', '')
+    mode = request.args.get('mode', 'dir')
+    try:
+        return jsonify(list_fs_entries(path_value, mode))
+    except FileNotFoundError as exc:
+        return jsonify({'error': str(exc)}), 404
+    except NotADirectoryError as exc:
+        return jsonify({'error': str(exc)}), 400
+    except PermissionError as exc:
+        return jsonify({'error': str(exc)}), 403
+
+
+@app.route('/api/fs/native-picker', methods=['POST'])
+def fs_native_picker():
+    data = request.json or {}
+    mode = data.get('mode', 'dir')
+    initial_path = data.get('initial_path', '')
+    try:
+        return jsonify(native_pick_path(mode, initial_path))
+    except RuntimeError as exc:
+        return jsonify({'error': str(exc)}), 501
+    except Exception as exc:
+        return jsonify({'error': f'Native picker failed: {exc}'}), 500
+
+
+# API: Update storage config
+@app.route('/api/storage', methods=['PUT'])
+def update_storage():
+    data = request.json or {}
+    existing = load_storage_config()
+    merged = {
+        'tasks_file': data.get('tasks_file', existing['tasks_file']),
+        'topics_dir': data.get('topics_dir', existing['topics_dir']),
+        'recovery_provider': data.get('recovery_provider', existing['recovery_provider']),
+        'recovery_dir': data.get('recovery_dir', existing['recovery_dir']),
+        'auto_snapshot_enabled': data.get('auto_snapshot_enabled', existing['auto_snapshot_enabled']),
+        'auto_snapshot_interval_seconds': data.get(
+            'auto_snapshot_interval_seconds',
+            existing['auto_snapshot_interval_seconds']
+        ),
+        'snapshot_retention_count': data.get(
+            'snapshot_retention_count',
+            existing['snapshot_retention_count']
+        ),
+    }
+    config = normalized_storage_config(merged)
+
+    if not config['tasks_file'] or not config['topics_dir'] or not config['recovery_dir']:
+        return jsonify({'error': 'tasks_file, topics_dir, and recovery_dir are required'}), 400
+
+    try:
+        ensure_storage_targets(config)
+        save_storage_config(config)
+    except OSError as exc:
+        return jsonify({'error': f'Failed to initialize storage locations: {exc}'}), 500
+    return jsonify(config)
+
+
+# API: List snapshots
+@app.route('/api/snapshots', methods=['GET'])
+def get_snapshots():
+    return jsonify(list_snapshots())
+
+
+# API: Create snapshot
+@app.route('/api/snapshots', methods=['POST'])
+def create_snapshot():
+    config = load_storage_config()
+    snapshots_dir = snapshot_root(config)
+    os.makedirs(snapshots_dir, exist_ok=True)
+
+    snapshot_id = next_snapshot_id(snapshots_dir, prefix='snapshot')
+    metadata = write_snapshot(snapshot_id, mode='manual', trigger='manual')
+    return jsonify(metadata), 201
+
+
+# API: Restore snapshot
+@app.route('/api/snapshots/<snapshot_id>/restore', methods=['POST'])
+def restore_snapshot_api(snapshot_id):
+    data = request.json or {}
+    mode = data.get('mode', 'revert')
+
+    try:
+        restore_snapshot(snapshot_id, mode)
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    except FileNotFoundError as exc:
+        return jsonify({'error': str(exc)}), 404
+    except OSError as exc:
+        return jsonify({'error': f'Restore failed: {exc}'}), 500
+
+    return jsonify({'success': True, 'id': snapshot_id, 'mode': mode})
 
 
 # API: Get all tasks
@@ -114,37 +728,51 @@ def get_tasks():
 # API: Create new task
 @app.route('/api/tasks', methods=['POST'])
 def create_task():
-    data = request.json
+    data = request.json or {}
     tasks = parse_tasks()
-    
+    try:
+        create_auto_snapshot_if_needed('task-create')
+    except OSError as exc:
+        return jsonify({'error': f'Automatic snapshot failed: {exc}'}), 500
+
     new_task = {
         'id': max([t['id'] for t in tasks], default=-1) + 1,
         'status': data.get('status', 'created'),
         'priority': data.get('priority', 'normal'),
         'date': datetime.now().strftime('%Y-%m-%d'),
-        'description': data.get('description', '')
+        'due_date': data.get('due_date'),
+        'description': data.get('description', ''),
+        'categories': normalize_categories(data.get('categories', []))
     }
-    
+
     tasks.append(new_task)
     save_tasks(tasks)
-    
+
     return jsonify(new_task), 201
 
 
 # API: Update task
 @app.route('/api/tasks/<int:task_id>', methods=['PUT'])
 def update_task(task_id):
-    data = request.json
+    data = request.json or {}
     tasks = parse_tasks()
-    
+
     for task in tasks:
         if task['id'] == task_id:
+            try:
+                create_auto_snapshot_if_needed('task-update')
+            except OSError as exc:
+                return jsonify({'error': f'Automatic snapshot failed: {exc}'}), 500
             task['status'] = data.get('status', task['status'])
             task['priority'] = data.get('priority', task['priority'])
             task['description'] = data.get('description', task['description'])
+            if 'due_date' in data:
+                task['due_date'] = data.get('due_date')
+            if 'categories' in data:
+                task['categories'] = normalize_categories(data.get('categories', []))
             save_tasks(tasks)
             return jsonify(task)
-    
+
     return jsonify({'error': 'Task not found'}), 404
 
 
@@ -152,30 +780,44 @@ def update_task(task_id):
 @app.route('/api/tasks/<int:task_id>', methods=['DELETE'])
 def delete_task(task_id):
     tasks = parse_tasks()
-    tasks = [t for t in tasks if t['id'] != task_id]
+    target_task = next((t for t in tasks if t['id'] == task_id), None)
+    if target_task is None:
+        return jsonify({'error': 'Task not found'}), 404
+    try:
+        create_auto_snapshot_if_needed('task-delete')
+    except OSError as exc:
+        return jsonify({'error': f'Automatic snapshot failed: {exc}'}), 500
+    target_task['status'] = 'deleted'
     save_tasks(tasks)
-    return jsonify({'success': True})
+    return jsonify(target_task)
 
 
 # API: Get open topics
 @app.route('/api/topics', methods=['GET'])
 def get_topics():
+    config = load_storage_config()
+    topics_dir = config['topics_dir']
     topics = []
-    if os.path.exists(OPEN_DIR):
-        for filename in os.listdir(OPEN_DIR):
+    if os.path.exists(topics_dir):
+        for filename in os.listdir(topics_dir):
             if filename.endswith('.md') and not filename.startswith('.'):
-                filepath = os.path.join(OPEN_DIR, filename)
+                filepath = os.path.join(topics_dir, filename)
                 # Extract date from filename (format: YYYY_M_D_name.md)
                 date_match = re.match(r'(\d{4}_\d{1,2}_\d{1,2})_(.+)\.md', filename)
                 if date_match:
                     date_str, name = date_match.groups()
-                    topics.append({
-                        'filename': filename,
-                        'name': name,
-                        'date': date_str.replace('_', '-'),
-                        'path': filepath
-                    })
-    
+                    topic_date = date_str.replace('_', '-')
+                else:
+                    stat = os.stat(filepath)
+                    topic_date = datetime.fromtimestamp(stat.st_mtime).strftime('%Y-%m-%d')
+                    name = os.path.splitext(filename)[0]
+                topics.append({
+                    'filename': filename,
+                    'name': name,
+                    'date': topic_date,
+                    'path': filepath
+                })
+
     # Sort by date descending
     topics.sort(key=lambda x: x['date'], reverse=True)
     return jsonify(topics)
@@ -184,27 +826,49 @@ def get_topics():
 # API: Create open topic
 @app.route('/api/topics', methods=['POST'])
 def create_topic():
-    data = request.json
+    data = request.json or {}
+    config = load_storage_config()
+    topics_dir = config['topics_dir']
+    try:
+        create_auto_snapshot_if_needed('topic-create')
+    except OSError as exc:
+        return jsonify({'error': f'Automatic snapshot failed: {exc}'}), 500
     name = data.get('name', 'untitled')
     content = data.get('content', '')
-    
+    requested_filepath = normalize_path(data.get('filepath'))
+
     # Sanitize filename
     safe_name = re.sub(r'[^\w\-]', '_', name)
-    
-    # Generate filename with date
+
     today = datetime.now()
-    filename = f"{today.year}_{today.month}_{today.day}_{safe_name}.md"
-    filepath = os.path.join(OPEN_DIR, filename)
-    
+    if requested_filepath:
+        topics_dir_abs = os.path.abspath(topics_dir)
+        requested_abs = os.path.abspath(requested_filepath)
+        try:
+            same_root = os.path.commonpath([topics_dir_abs, requested_abs]) == topics_dir_abs
+        except ValueError:
+            same_root = False
+        if not same_root:
+            return jsonify({'error': 'Topic file must be inside the configured topics folder'}), 400
+        filepath = requested_abs
+        if not filepath.lower().endswith('.md'):
+            filepath = f"{filepath}.md"
+        filename = os.path.basename(filepath)
+        safe_name = os.path.splitext(filename)[0]
+    else:
+        # Generate filename with date
+        filename = f"{today.year}_{today.month}_{today.day}_{safe_name}.md"
+        filepath = os.path.join(topics_dir, filename)
+
     # Check if file already exists
     if os.path.exists(filepath):
         return jsonify({'error': 'Topic with this name already exists'}), 409
-    
+
     # Create the file
-    os.makedirs(OPEN_DIR, exist_ok=True)
+    os.makedirs(os.path.dirname(filepath), exist_ok=True)
     with open(filepath, 'w', encoding='utf-8') as f:
         f.write(content)
-    
+
     return jsonify({
         'filename': filename,
         'name': safe_name,
@@ -214,20 +878,37 @@ def create_topic():
 
 
 # API: Get topic content
-@app.route('/api/topics/<path:filename>', methods=['GET'])
+@app.route('/api/topics/<path:filename>', methods=['GET', 'PUT'])
 def get_topic_content(filename):
-    filepath = os.path.join(OPEN_DIR, filename)
+    config = load_storage_config()
+    try:
+        filepath = resolve_topic_path(filename, config['topics_dir'])
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+
     if not os.path.exists(filepath):
         return jsonify({'error': 'Topic not found'}), 404
-    
+
+    if request.method == 'PUT':
+        data = request.json or {}
+        content = data.get('content', '')
+        try:
+            with open(filepath, 'w', encoding='utf-8') as f:
+                f.write(content)
+        except OSError as exc:
+            return jsonify({'error': f'Failed to save topic: {exc}'}), 500
+        return jsonify({'success': True, 'filename': filename})
+
     with open(filepath, 'r', encoding='utf-8') as f:
         content = f.read()
-    
+
     return jsonify({'filename': filename, 'content': content})
 
 
 if __name__ == '__main__':
-    print(f"Task Manager running at http://localhost:5050")
-    print(f"Tasks file: {TASKS_FILE}")
-    print(f"Open topics: {OPEN_DIR}")
+    config = load_storage_config()
+    print("Task Manager running at http://localhost:5050")
+    print(f"Tasks file: {config['tasks_file']}")
+    print(f"Open topics: {config['topics_dir']}")
+    print(f"Recovery snapshots: {snapshot_root(config)}")
     app.run(host='0.0.0.0', port=5050, debug=True)
