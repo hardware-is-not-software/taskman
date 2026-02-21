@@ -22,6 +22,8 @@ DEFAULT_TOPICS_DIR = os.path.join(BASE_DIR, 'topics')
 DEFAULT_RECOVERY_DIR = os.path.join(BASE_DIR, 'recovery')
 STORAGE_CONFIG_FILE = os.path.join(BASE_DIR, 'storage_config.json')
 LEGACY_STORAGE_CONFIG_FILE = os.path.join(BASE_DIR, 'tasks', 'storage_config.json')
+CATEGORIES_FILE = os.path.join(BASE_DIR, 'categories.json')
+DEFAULT_CATEGORY = 'default'
 ALLOWED_PROVIDERS = {'local', 'onedrive', 'sharepoint', 'icloud'}
 SNAPSHOT_NAME_PATTERN = re.compile(r'^[A-Za-z0-9_-]+$')
 
@@ -176,6 +178,112 @@ def save_storage_config(config):
         json.dump(config, f, indent=2)
 
 
+def normalize_category_name(value):
+    if not isinstance(value, str):
+        return ''
+    name = value.strip()
+    if not name:
+        return ''
+    # Keep category names file-safe for task header serialization.
+    name = re.sub(r'[|()]+', '-', name)
+    return name
+
+
+def normalize_category_list(values):
+    items = []
+    if isinstance(values, str):
+        items = values.split(',')
+    elif isinstance(values, list):
+        items = values
+
+    cleaned = []
+    seen = set()
+    for item in items:
+        name = normalize_category_name(item)
+        if not name:
+            continue
+        key = name.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(name)
+
+    if not cleaned:
+        cleaned = [DEFAULT_CATEGORY]
+    return cleaned
+
+
+def ensure_categories_file():
+    if os.path.exists(CATEGORIES_FILE):
+        return
+    with open(CATEGORIES_FILE, 'w', encoding='utf-8') as f:
+        json.dump([DEFAULT_CATEGORY], f, indent=2)
+
+
+def save_categories(categories):
+    normalized = normalize_category_list(categories)
+    ordered = [DEFAULT_CATEGORY] + [
+        cat for cat in normalized if cat.lower() != DEFAULT_CATEGORY
+    ]
+    os.makedirs(os.path.dirname(CATEGORIES_FILE), exist_ok=True)
+    with open(CATEGORIES_FILE, 'w', encoding='utf-8') as f:
+        json.dump(ordered, f, indent=2)
+    return ordered
+
+
+def load_categories():
+    ensure_categories_file()
+    try:
+        with open(CATEGORIES_FILE, 'r', encoding='utf-8') as f:
+            raw = json.load(f)
+    except (OSError, ValueError):
+        raw = [DEFAULT_CATEGORY]
+    if not isinstance(raw, list):
+        raw = [DEFAULT_CATEGORY]
+    categories = save_categories(raw)
+    return categories
+
+
+def normalize_task_categories(value, allowed_categories=None):
+    normalized = normalize_category_list(value)
+    if not allowed_categories:
+        return normalized
+    allowed_lookup = {cat.lower(): cat for cat in allowed_categories}
+    resolved = []
+    seen = set()
+    for name in normalized:
+        match = allowed_lookup.get(name.lower())
+        if not match:
+            continue
+        key = match.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        resolved.append(match)
+    if not resolved:
+        resolved = [allowed_lookup.get(DEFAULT_CATEGORY, DEFAULT_CATEGORY)]
+    return resolved
+
+
+def sync_categories_from_tasks(tasks):
+    categories = load_categories()
+    lookup = {cat.lower() for cat in categories}
+    changed = False
+    for task in tasks:
+        for category in task.get('categories', []):
+            name = normalize_category_name(category)
+            if not name:
+                continue
+            key = name.lower()
+            if key not in lookup:
+                categories.append(name)
+                lookup.add(key)
+                changed = True
+    if changed:
+        categories = save_categories(categories)
+    return categories
+
+
 def ensure_storage_targets(config):
     os.makedirs(os.path.dirname(config['tasks_file']), exist_ok=True)
     os.makedirs(config['topics_dir'], exist_ok=True)
@@ -279,29 +387,7 @@ def native_pick_path(mode, initial_path):
 
 
 def normalize_categories(value):
-    if not value:
-        return []
-    if isinstance(value, str):
-        items = value.split(',')
-    elif isinstance(value, list):
-        items = value
-    else:
-        return []
-    cleaned = []
-    seen = set()
-    for item in items:
-        if not isinstance(item, str):
-            continue
-        name = item.strip()
-        if not name:
-            continue
-        name = re.sub(r'[|()]+', '-', name)
-        key = name.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        cleaned.append(name)
-    return cleaned
+    return normalize_category_list(value)
 
 
 def is_date(value):
@@ -369,7 +455,7 @@ def parse_tasks(tasks_file=None):
                     'date': date,
                     'due_date': due_date,
                     'description': description,
-                    'categories': normalize_categories(categories_raw)
+                    'categories': normalize_task_categories(categories_raw)
                 }
                 task_id += 1
                 continue
@@ -387,7 +473,7 @@ def parse_tasks(tasks_file=None):
                 'date': datetime.now().strftime('%Y-%m-%d'),
                 'due_date': None,
                 'description': description.strip(),
-                'categories': []
+                'categories': [DEFAULT_CATEGORY]
             }
             task_id += 1
             continue
@@ -411,7 +497,7 @@ def save_tasks(tasks, tasks_file=None):
 
     with open(tasks_file, 'w', encoding='utf-8') as f:
         for task in tasks:
-            categories = normalize_categories(task.get('categories', []))
+            categories = normalize_task_categories(task.get('categories', []))
             due_date = task.get('due_date')
             if categories or due_date:
                 due_segment = due_date or ''
@@ -722,7 +808,88 @@ def restore_snapshot_api(snapshot_id):
 @app.route('/api/tasks', methods=['GET'])
 def get_tasks():
     tasks = parse_tasks()
+    sync_categories_from_tasks(tasks)
     return jsonify(tasks)
+
+
+@app.route('/api/categories', methods=['GET'])
+def get_categories():
+    tasks = parse_tasks()
+    categories = sync_categories_from_tasks(tasks)
+    return jsonify(categories)
+
+
+@app.route('/api/categories', methods=['POST'])
+def create_category():
+    data = request.json or {}
+    name = normalize_category_name(data.get('name'))
+    if not name:
+        return jsonify({'error': 'Category name is required'}), 400
+
+    categories = load_categories()
+    lookup = {cat.lower() for cat in categories}
+    if name.lower() in lookup:
+        return jsonify({'error': 'Category already exists'}), 409
+    categories.append(name)
+    categories = save_categories(categories)
+    return jsonify({'name': name, 'categories': categories}), 201
+
+
+@app.route('/api/categories/<path:category_name>', methods=['PUT'])
+def rename_category(category_name):
+    old_name = normalize_category_name(category_name)
+    new_name = normalize_category_name((request.json or {}).get('name'))
+    if not old_name or not new_name:
+        return jsonify({'error': 'Both old and new category names are required'}), 400
+    if old_name.lower() == DEFAULT_CATEGORY:
+        return jsonify({'error': 'Default category cannot be edited'}), 400
+    if new_name.lower() == DEFAULT_CATEGORY:
+        return jsonify({'error': 'Default category cannot be used as rename target'}), 400
+
+    categories = load_categories()
+    category_lookup = {cat.lower(): cat for cat in categories}
+    if old_name.lower() not in category_lookup:
+        return jsonify({'error': 'Category not found'}), 404
+    if new_name.lower() in category_lookup and new_name.lower() != old_name.lower():
+        return jsonify({'error': 'Category already exists'}), 409
+
+    tasks = parse_tasks()
+    for task in tasks:
+        replaced = []
+        for cat in task.get('categories', []):
+            if normalize_category_name(cat).lower() == old_name.lower():
+                replaced.append(new_name)
+            else:
+                replaced.append(cat)
+        task['categories'] = normalize_task_categories(replaced)
+
+    categories = [new_name if cat.lower() == old_name.lower() else cat for cat in categories]
+    categories = save_categories(categories)
+    save_tasks(tasks)
+    return jsonify({'categories': categories})
+
+
+@app.route('/api/categories/<path:category_name>', methods=['DELETE'])
+def delete_category(category_name):
+    target = normalize_category_name(category_name)
+    if not target:
+        return jsonify({'error': 'Category name is required'}), 400
+    if target.lower() == DEFAULT_CATEGORY:
+        return jsonify({'error': 'Default category cannot be deleted'}), 400
+
+    categories = load_categories()
+    if target.lower() not in {cat.lower() for cat in categories}:
+        return jsonify({'error': 'Category not found'}), 404
+
+    tasks = parse_tasks()
+    for task in tasks:
+        remaining = [cat for cat in task.get('categories', []) if normalize_category_name(cat).lower() != target.lower()]
+        task['categories'] = normalize_task_categories(remaining)
+
+    categories = [cat for cat in categories if cat.lower() != target.lower()]
+    categories = save_categories(categories)
+    save_tasks(tasks)
+    return jsonify({'categories': categories})
 
 
 # API: Create new task
@@ -735,6 +902,7 @@ def create_task():
     except OSError as exc:
         return jsonify({'error': f'Automatic snapshot failed: {exc}'}), 500
 
+    categories = load_categories()
     new_task = {
         'id': max([t['id'] for t in tasks], default=-1) + 1,
         'status': data.get('status', 'created'),
@@ -742,7 +910,7 @@ def create_task():
         'date': datetime.now().strftime('%Y-%m-%d'),
         'due_date': data.get('due_date'),
         'description': data.get('description', ''),
-        'categories': normalize_categories(data.get('categories', []))
+        'categories': normalize_task_categories(data.get('categories', []), categories)
     }
 
     tasks.append(new_task)
@@ -756,6 +924,7 @@ def create_task():
 def update_task(task_id):
     data = request.json or {}
     tasks = parse_tasks()
+    categories = load_categories()
 
     for task in tasks:
         if task['id'] == task_id:
@@ -769,7 +938,7 @@ def update_task(task_id):
             if 'due_date' in data:
                 task['due_date'] = data.get('due_date')
             if 'categories' in data:
-                task['categories'] = normalize_categories(data.get('categories', []))
+                task['categories'] = normalize_task_categories(data.get('categories', []), categories)
             save_tasks(tasks)
             return jsonify(task)
 

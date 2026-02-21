@@ -454,6 +454,47 @@ select:focus {
     color: var(--text-muted);
 }
 
+.category-filter {
+    align-items: flex-start;
+}
+
+.category-filter .btn {
+    margin-top: 0.05rem;
+}
+
+.category-filter .category-filters {
+    max-width: 320px;
+}
+
+.category-manage-list {
+    padding: 0 1rem 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.category-manage-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 0.5rem 0.625rem;
+    background: var(--card-bg);
+}
+
+.category-name {
+    font-size: 0.875rem;
+    color: var(--text);
+}
+
+.category-manage-actions {
+    display: flex;
+    gap: 0.375rem;
+    flex-wrap: wrap;
+}
+
 /* Task List */
 .task-list {
     display: flex;

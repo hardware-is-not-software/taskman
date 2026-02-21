@@ -7,6 +7,7 @@ let tasks = [];
 let topics = [];
 let storageConfig = null;
 let snapshots = [];
+let categories = [];
 let selectedStatuses = new Set(['created', 'active', 'due']);
 let selectedCategories = new Set();
 const STATUS_OPTIONS = ['created', 'active', 'due', 'closed', 'deleted'];
@@ -28,6 +29,9 @@ const snapshotList = document.getElementById('snapshot-list');
 const storageMessage = document.getElementById('storage-message');
 const appShell = document.querySelector('.app-shell');
 const storageToggleBtn = document.getElementById('btn-storage-toggle');
+const taskCategoriesSelect = document.getElementById('task-categories');
+const modalCategories = document.getElementById('modal-categories');
+const categoryManageList = document.getElementById('category-manage-list');
 
 // Modals
 const modalTask = document.getElementById('modal-task');
@@ -36,10 +40,12 @@ const modalTopicEdit = document.getElementById('modal-topic-edit');
 const formTask = document.getElementById('form-task');
 const formTopic = document.getElementById('form-topic');
 const formTopicEdit = document.getElementById('form-topic-edit');
+const formCategoryAdd = document.getElementById('form-category-add');
 
 // Initialize
 document.addEventListener('DOMContentLoaded', () => {
     setStoragePanelCollapsed(false);
+    loadCategories();
     loadStorageConfig();
     loadSnapshots();
     loadTasks();
@@ -116,7 +122,7 @@ function setupEventListeners() {
     });
     
     // Close modal on backdrop click
-    [modalTask, modalTopic, modalTopicEdit].forEach(modal => {
+    [modalTask, modalTopic, modalTopicEdit, modalCategories].forEach(modal => {
         modal.addEventListener('click', (e) => {
             if (e.target === modal) {
                 modal.classList.add('hidden');
@@ -130,6 +136,7 @@ function setupEventListeners() {
     // Topic form submit
     formTopic.addEventListener('submit', handleTopicSubmit);
     formTopicEdit.addEventListener('submit', handleTopicEditSubmit);
+    formCategoryAdd.addEventListener('submit', handleCategoryCreate);
     
     // Filter and sort changes
     sortBy.addEventListener('change', renderTasks);
@@ -152,6 +159,11 @@ function setupEventListeners() {
             openNativePicker(target, mode);
         });
     });
+    document.getElementById('btn-manage-categories').addEventListener('click', () => {
+        modalCategories.classList.remove('hidden');
+        renderCategoryManager();
+    });
+    categoryManageList.addEventListener('click', handleCategoryManagerAction);
     
     // Click outside to close inline edit
     document.addEventListener('click', (e) => {
@@ -165,6 +177,28 @@ function setupEventListeners() {
     // Auto-resize textarea
     document.getElementById('task-description').addEventListener('input', autoResize);
     document.getElementById('topic-content').addEventListener('input', autoResize);
+}
+
+async function loadCategories() {
+    try {
+        const response = await fetch('/api/categories');
+        if (!response.ok) {
+            throw new Error('Failed to load categories');
+        }
+        categories = await response.json();
+        if (!categories.length) {
+            categories = ['default'];
+        }
+        sanitizeSelectedCategories();
+        renderCategoryFilters();
+        renderTaskCategorySelect();
+        renderCategoryManager();
+        if (tasks.length > 0) {
+            renderTasks();
+        }
+    } catch (error) {
+        console.error('Failed to load categories:', error);
+    }
 }
 
 async function openNativePicker(targetInputId, mode) {
@@ -473,7 +507,9 @@ function renderTasks() {
                             <option value="low" ${task.priority === 'low' ? 'selected' : ''}>Low</option>
                         </select>
                         <input type="date" id="edit-due-date-${task.id}" value="${escapeAttribute(task.due_date || '')}">
-                        <input type="text" id="edit-categories-${task.id}" value="${escapeAttribute((task.categories || []).join(', '))}" placeholder="categories">
+                        <select id="edit-categories-${task.id}">
+                            ${renderCategoryOptions(getTaskPrimaryCategory(task))}
+                        </select>
                         <div class="inline-edit-actions">
                             <button class="btn btn-secondary" onclick="cancelInlineEdit(${task.id})">Cancel</button>
                             <button class="btn btn-primary" onclick="saveInlineEdit(${task.id})">Save</button>
@@ -518,6 +554,28 @@ function renderTasks() {
     `).join('');
 }
 
+function renderCategoryOptions(selectedCategory) {
+    const fallback = categories.find(c => c.toLowerCase() === 'default') || categories[0] || 'default';
+    const selected = selectedCategory || fallback;
+    return categories.map(category => `
+        <option value="${escapeAttribute(category)}" ${category === selected ? 'selected' : ''}>${escapeHtml(category)}</option>
+    `).join('');
+}
+
+function getTaskPrimaryCategory(task) {
+    const taskCategories = task?.categories || [];
+    if (taskCategories.length > 0) {
+        const value = taskCategories[0];
+        if (categories.includes(value)) return value;
+    }
+    return categories.find(c => c.toLowerCase() === 'default') || categories[0] || 'default';
+}
+
+function renderTaskCategorySelect() {
+    if (!taskCategoriesSelect) return;
+    taskCategoriesSelect.innerHTML = renderCategoryOptions(getDefaultCategory());
+}
+
 // Render topics
 function renderTopics() {
     if (topics.length === 0) {
@@ -550,7 +608,7 @@ function openTaskModal() {
     statusField.value = 'created';
     priorityField.value = 'normal';
     dueDateField.value = '';
-    document.getElementById('task-categories').value = '';
+    renderTaskCategorySelect();
     
     modalTask.classList.remove('hidden');
     descField.focus();
@@ -598,7 +656,7 @@ function cancelInlineEdit(id) {
             document.getElementById(`edit-status-${id}`).value = task.status;
             document.getElementById(`edit-priority-${id}`).value = task.priority;
             document.getElementById(`edit-due-date-${id}`).value = task.due_date || '';
-            document.getElementById(`edit-categories-${id}`).value = (task.categories || []).join(', ');
+            document.getElementById(`edit-categories-${id}`).value = getTaskPrimaryCategory(task);
         }
     }
 }
@@ -608,7 +666,8 @@ async function saveInlineEdit(id) {
     const status = document.getElementById(`edit-status-${id}`).value;
     const priority = document.getElementById(`edit-priority-${id}`).value;
     const due_date = document.getElementById(`edit-due-date-${id}`).value || null;
-    const categories = parseCategoriesInput(document.getElementById(`edit-categories-${id}`).value);
+    const selectedCategory = document.getElementById(`edit-categories-${id}`).value;
+    const categories = [selectedCategory || getDefaultCategory()];
     
     try {
         const response = await fetch(`/api/tasks/${id}`, {
@@ -675,7 +734,7 @@ async function handleTaskSubmit(e) {
         status: document.getElementById('task-status').value,
         priority: document.getElementById('task-priority').value,
         due_date: document.getElementById('task-due-date').value || null,
-        categories: parseCategoriesInput(document.getElementById('task-categories').value)
+        categories: [document.getElementById('task-categories').value || getDefaultCategory()]
     };
     
     try {
@@ -861,7 +920,7 @@ function renderCategoryFilters() {
     if (!categoryFilters) return;
     categoryFilters.innerHTML = '';
 
-    const allCategories = getAllCategories();
+    const allCategories = [...categories];
     if (allCategories.length === 0) {
         const empty = document.createElement('span');
         empty.className = 'empty-inline';
@@ -899,26 +958,102 @@ function renderCategoryFilters() {
     });
 }
 
-function getAllCategories() {
-    const set = new Set();
-    tasks.forEach(task => {
-        (task.categories || []).forEach(category => set.add(category));
-    });
-    return Array.from(set).sort((a, b) => a.localeCompare(b));
-}
-
 function renderCategoryBadges(categories = []) {
     if (!categories || categories.length === 0) return '';
     return categories.map(c => `<span class="category-badge">${escapeHtml(c)}</span>`).join('');
 }
 
-function parseCategoriesInput(input) {
-    return Array.from(new Set(
-        (input || '')
-            .split(',')
-            .map(item => item.trim())
-            .filter(Boolean)
-    ));
+function getDefaultCategory() {
+    return categories.find(cat => cat.toLowerCase() === 'default') || categories[0] || 'default';
+}
+
+function sanitizeSelectedCategories() {
+    const allowed = new Set(categories);
+    selectedCategories = new Set(Array.from(selectedCategories).filter(cat => allowed.has(cat)));
+}
+
+function renderCategoryManager() {
+    if (!categoryManageList) return;
+    if (!categories.length) {
+        categoryManageList.innerHTML = '<div class="empty-state">No categories</div>';
+        return;
+    }
+    categoryManageList.innerHTML = categories.map(category => {
+        const isDefault = category.toLowerCase() === 'default';
+        return `
+            <div class="category-manage-item">
+                <span class="category-name">${escapeHtml(category)}${isDefault ? ' (default)' : ''}</span>
+                <div class="category-manage-actions">
+                    ${isDefault ? '' : `<button type="button" class="btn btn-secondary btn-small" data-action="rename" data-category="${escapeAttribute(category)}">Edit</button>`}
+                    ${isDefault ? '' : `<button type="button" class="btn btn-secondary btn-small" data-action="delete" data-category="${escapeAttribute(category)}">Delete</button>`}
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
+async function handleCategoryCreate(e) {
+    e.preventDefault();
+    const input = document.getElementById('new-category-name');
+    const name = input.value.trim();
+    if (!name) return;
+    try {
+        const response = await fetch('/api/categories', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name })
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+            throw new Error(payload.error || 'Failed to create category');
+        }
+        input.value = '';
+        await Promise.all([loadCategories(), loadTasks()]);
+    } catch (error) {
+        alert(error.message || 'Failed to create category');
+    }
+}
+
+async function handleCategoryManagerAction(e) {
+    const action = e.target.dataset.action;
+    const category = e.target.dataset.category;
+    if (!action || !category) return;
+
+    if (action === 'rename') {
+        const nextName = prompt('Rename category', category);
+        if (!nextName || nextName.trim() === category) return;
+        try {
+            const response = await fetch(`/api/categories/${encodeURIComponent(category)}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name: nextName.trim() })
+            });
+            const payload = await response.json();
+            if (!response.ok) {
+                throw new Error(payload.error || 'Failed to edit category');
+            }
+            await Promise.all([loadCategories(), loadTasks()]);
+        } catch (error) {
+            alert(error.message || 'Failed to edit category');
+        }
+        return;
+    }
+
+    if (action === 'delete') {
+        if (!confirm(`Delete category "${category}"? Tasks using it will fall back to default.`)) return;
+        try {
+            const response = await fetch(`/api/categories/${encodeURIComponent(category)}`, {
+                method: 'DELETE'
+            });
+            const payload = await response.json();
+            if (!response.ok) {
+                throw new Error(payload.error || 'Failed to delete category');
+            }
+            await Promise.all([loadCategories(), loadTasks()]);
+        } catch (error) {
+            alert(error.message || 'Failed to delete category');
+        }
+    }
 }
 
 function getDueClass(task) {
