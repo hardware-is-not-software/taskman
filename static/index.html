@@ -109,6 +109,10 @@
                     <label>Status:</label>
                     <div id="status-filters" class="status-filters"></div>
                 </div>
+                <div class="filter-group category-filter">
+                    <label>Categories:</label>
+                    <div id="category-filters" class="category-filters"></div>
+                </div>
                 <div class="filter-group">
                     <label>Sort:</label>
                     <select id="sort-by">
@@ -159,6 +163,10 @@
                         <div class="form-group">
                             <label for="task-due-date">Due Date</label>
                             <input type="date" id="task-due-date">
+                        </div>
+                        <div class="form-group">
+                            <label for="task-categories">Categories</label>
+                            <input type="text" id="task-categories" placeholder="e.g. backend, infra">
                         </div>
                         <div class="form-actions">
                             <button type="button" class="btn btn-secondary" data-close="modal-task">Cancel</button>

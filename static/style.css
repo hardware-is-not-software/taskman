@@ -398,6 +398,12 @@ select:focus {
     flex-wrap: wrap;
 }
 
+.category-filters {
+    display: flex;
+    gap: 0.375rem;
+    flex-wrap: wrap;
+}
+
 .status-chip {
     border: 1px solid var(--gray-300);
     background: var(--card-bg);
@@ -419,6 +425,33 @@ select:focus {
     background: var(--primary);
     border-color: var(--primary);
     color: white;
+}
+
+.category-chip {
+    border: 1px solid var(--gray-300);
+    background: var(--card-bg);
+    color: var(--gray-700);
+    padding: 0.2rem 0.5rem;
+    border-radius: 9999px;
+    font-size: 0.75rem;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.category-chip:hover {
+    border-color: var(--primary);
+    color: var(--primary);
+}
+
+.category-chip.active {
+    background: var(--primary);
+    border-color: var(--primary);
+    color: white;
+}
+
+.empty-inline {
+    font-size: 0.75rem;
+    color: var(--text-muted);
 }
 
 /* Task List */
@@ -565,6 +598,17 @@ select:focus {
 .due-badge.overdue {
     background: #fee2e2;
     color: var(--danger);
+}
+
+.category-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 0.125rem 0.4rem;
+    border-radius: 9999px;
+    font-size: 0.65rem;
+    font-weight: 500;
+    background: var(--gray-100);
+    color: var(--gray-700);
 }
 
 .task-description {

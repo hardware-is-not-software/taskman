@@ -8,6 +8,7 @@ let topics = [];
 let storageConfig = null;
 let snapshots = [];
 let selectedStatuses = new Set(['created', 'active', 'due']);
+let selectedCategories = new Set();
 const STATUS_OPTIONS = ['created', 'active', 'due', 'closed', 'deleted'];
 const RECOVERY_PROVIDER_LABELS = {
     local: 'Local folder',
@@ -20,6 +21,7 @@ const RECOVERY_PROVIDER_LABELS = {
 const taskList = document.getElementById('task-list');
 const topicList = document.getElementById('topic-list');
 const statusFilters = document.getElementById('status-filters');
+const categoryFilters = document.getElementById('category-filters');
 const sortBy = document.getElementById('sort-by');
 const formStorage = document.getElementById('form-storage');
 const snapshotList = document.getElementById('snapshot-list');
@@ -387,7 +389,12 @@ async function loadTasks() {
     try {
         const response = await fetch('/api/tasks');
         tasks = await response.json();
+        tasks = tasks.map(task => ({
+            ...task,
+            categories: Array.isArray(task.categories) ? task.categories : []
+        }));
         renderStatusFilters();
+        renderCategoryFilters();
         renderTasks();
     } catch (error) {
         console.error('Failed to load tasks:', error);
@@ -417,6 +424,9 @@ function renderTasks() {
     } else {
         filtered = tasks.filter(t => selectedStatuses.has(t.status));
     }
+    if (selectedCategories.size > 0) {
+        filtered = filtered.filter(task => (task.categories || []).some(cat => selectedCategories.has(cat)));
+    }
     
     // Sort
     filtered = [...filtered].sort((a, b) => {
@@ -444,6 +454,7 @@ function renderTasks() {
                     <span class="priority-badge ${task.priority}">${task.priority}</span>
                     <span class="task-date">${formatDate(task.date)}</span>
                     ${renderDueBadge(task)}
+                    ${renderCategoryBadges(task.categories)}
                 </div>
                 <div class="task-description ${task.status === 'closed' || task.status === 'deleted' ? 'closed' : ''}" onclick="startInlineEdit(${task.id})" title="${escapeHtml(task.description).replace(/"/g, '&quot;')}">${escapeHtml(task.description)}</div>
                 <div class="inline-edit">
@@ -462,6 +473,7 @@ function renderTasks() {
                             <option value="low" ${task.priority === 'low' ? 'selected' : ''}>Low</option>
                         </select>
                         <input type="date" id="edit-due-date-${task.id}" value="${escapeAttribute(task.due_date || '')}">
+                        <input type="text" id="edit-categories-${task.id}" value="${escapeAttribute((task.categories || []).join(', '))}" placeholder="categories">
                         <div class="inline-edit-actions">
                             <button class="btn btn-secondary" onclick="cancelInlineEdit(${task.id})">Cancel</button>
                             <button class="btn btn-primary" onclick="saveInlineEdit(${task.id})">Save</button>
@@ -538,6 +550,7 @@ function openTaskModal() {
     statusField.value = 'created';
     priorityField.value = 'normal';
     dueDateField.value = '';
+    document.getElementById('task-categories').value = '';
     
     modalTask.classList.remove('hidden');
     descField.focus();
@@ -585,6 +598,7 @@ function cancelInlineEdit(id) {
             document.getElementById(`edit-status-${id}`).value = task.status;
             document.getElementById(`edit-priority-${id}`).value = task.priority;
             document.getElementById(`edit-due-date-${id}`).value = task.due_date || '';
+            document.getElementById(`edit-categories-${id}`).value = (task.categories || []).join(', ');
         }
     }
 }
@@ -594,12 +608,13 @@ async function saveInlineEdit(id) {
     const status = document.getElementById(`edit-status-${id}`).value;
     const priority = document.getElementById(`edit-priority-${id}`).value;
     const due_date = document.getElementById(`edit-due-date-${id}`).value || null;
+    const categories = parseCategoriesInput(document.getElementById(`edit-categories-${id}`).value);
     
     try {
         const response = await fetch(`/api/tasks/${id}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ description, status, priority, due_date })
+            body: JSON.stringify({ description, status, priority, due_date, categories })
         });
         
         if (response.ok) {
@@ -659,7 +674,8 @@ async function handleTaskSubmit(e) {
         description: document.getElementById('task-description').value,
         status: document.getElementById('task-status').value,
         priority: document.getElementById('task-priority').value,
-        due_date: document.getElementById('task-due-date').value || null
+        due_date: document.getElementById('task-due-date').value || null,
+        categories: parseCategoriesInput(document.getElementById('task-categories').value)
     };
     
     try {
@@ -839,6 +855,70 @@ function renderStatusFilters() {
         });
         statusFilters.appendChild(btn);
     });
+}
+
+function renderCategoryFilters() {
+    if (!categoryFilters) return;
+    categoryFilters.innerHTML = '';
+
+    const allCategories = getAllCategories();
+    if (allCategories.length === 0) {
+        const empty = document.createElement('span');
+        empty.className = 'empty-inline';
+        empty.textContent = 'No categories';
+        categoryFilters.appendChild(empty);
+        return;
+    }
+
+    const allBtn = document.createElement('button');
+    allBtn.type = 'button';
+    allBtn.className = `category-chip ${selectedCategories.size === 0 ? 'active' : ''}`;
+    allBtn.textContent = 'Any';
+    allBtn.addEventListener('click', () => {
+        selectedCategories = new Set();
+        renderCategoryFilters();
+        renderTasks();
+    });
+    categoryFilters.appendChild(allBtn);
+
+    allCategories.forEach(category => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = `category-chip ${selectedCategories.has(category) ? 'active' : ''}`;
+        btn.textContent = category;
+        btn.addEventListener('click', () => {
+            if (selectedCategories.has(category)) {
+                selectedCategories.delete(category);
+            } else {
+                selectedCategories.add(category);
+            }
+            renderCategoryFilters();
+            renderTasks();
+        });
+        categoryFilters.appendChild(btn);
+    });
+}
+
+function getAllCategories() {
+    const set = new Set();
+    tasks.forEach(task => {
+        (task.categories || []).forEach(category => set.add(category));
+    });
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+}
+
+function renderCategoryBadges(categories = []) {
+    if (!categories || categories.length === 0) return '';
+    return categories.map(c => `<span class="category-badge">${escapeHtml(c)}</span>`).join('');
+}
+
+function parseCategoriesInput(input) {
+    return Array.from(new Set(
+        (input || '')
+            .split(',')
+            .map(item => item.trim())
+            .filter(Boolean)
+    ));
 }
 
 function getDueClass(task) {

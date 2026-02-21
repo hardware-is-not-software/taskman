@@ -46,6 +46,7 @@ ENV/
 .AppleDouble
 .LSOverride
 ._*
+.codex
 
 # IDE
 .idea/
