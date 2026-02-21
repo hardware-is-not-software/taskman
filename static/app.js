@@ -11,6 +11,13 @@ let categories = [];
 let selectedStatuses = new Set(['created', 'active', 'due']);
 let selectedCategories = new Set();
 const STATUS_OPTIONS = ['created', 'active', 'due', 'closed', 'deleted'];
+const STATUS_SORT_ORDER = {
+    due: 0,
+    active: 1,
+    created: 2,
+    closed: 3,
+    deleted: 4
+};
 const RECOVERY_PROVIDER_LABELS = {
     local: 'Local folder',
     onedrive: 'OneDrive',
@@ -240,11 +247,11 @@ function setStoragePanelCollapsed(collapsed) {
     appShell.classList.toggle('storage-collapsed', collapsed);
     if (collapsed) {
         storageToggleBtn.textContent = '▶';
-        storageToggleBtn.title = 'Maximize storage panel';
+        storageToggleBtn.dataset.tooltip = 'Maximize storage panel';
         storageToggleBtn.setAttribute('aria-label', 'Maximize storage panel');
     } else {
         storageToggleBtn.textContent = '◀';
-        storageToggleBtn.title = 'Minimize storage panel';
+        storageToggleBtn.dataset.tooltip = 'Minimize storage panel';
         storageToggleBtn.setAttribute('aria-label', 'Minimize storage panel');
     }
 }
@@ -471,6 +478,18 @@ function renderTasks() {
         } else if (sort === 'priority') {
             const priorityOrder = { urgent: 0, normal: 1, low: 2 };
             return priorityOrder[a.priority] - priorityOrder[b.priority];
+        } else if (sort === 'status') {
+            const statusDelta = (STATUS_SORT_ORDER[a.status] ?? 999) - (STATUS_SORT_ORDER[b.status] ?? 999);
+            if (statusDelta !== 0) return statusDelta;
+            return b.date.localeCompare(a.date);
+        } else if (sort === 'category-status') {
+            const aCategory = getTaskPrimaryCategory(a).toLowerCase();
+            const bCategory = getTaskPrimaryCategory(b).toLowerCase();
+            const categoryDelta = aCategory.localeCompare(bCategory);
+            if (categoryDelta !== 0) return categoryDelta;
+            const statusDelta = (STATUS_SORT_ORDER[a.status] ?? 999) - (STATUS_SORT_ORDER[b.status] ?? 999);
+            if (statusDelta !== 0) return statusDelta;
+            return b.date.localeCompare(a.date);
         }
         return 0;
     });
@@ -490,7 +509,7 @@ function renderTasks() {
                     ${renderDueBadge(task)}
                     ${renderCategoryBadges(task.categories)}
                 </div>
-                <div class="task-description ${task.status === 'closed' || task.status === 'deleted' ? 'closed' : ''}" onclick="startInlineEdit(${task.id})" title="${escapeHtml(task.description).replace(/"/g, '&quot;')}">${escapeHtml(task.description)}</div>
+                <div class="task-description ${task.status === 'closed' || task.status === 'deleted' ? 'closed' : ''}" onclick="startInlineEdit(${task.id})" data-tooltip="${escapeHtml(task.description).replace(/"/g, '&quot;')}">${escapeHtml(task.description)}</div>
                 <div class="inline-edit">
                     <textarea id="edit-desc-${task.id}">${escapeHtml(task.description)}</textarea>
                     <div class="inline-edit-row">
@@ -519,7 +538,7 @@ function renderTasks() {
             </div>
             <div class="task-actions">
                 ${task.status !== 'active' && task.status !== 'deleted' ? `
-                    <button onclick="setTaskStatus(${task.id}, 'active')" title="Set Active">
+                    <button onclick="setTaskStatus(${task.id}, 'active')" aria-label="Set Active" data-tooltip="Set Active">
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <circle cx="12" cy="12" r="10"/>
                             <polygon points="10 8 16 12 10 16 10 8"/>
@@ -527,13 +546,13 @@ function renderTasks() {
                     </button>
                 ` : ''}
                 ${task.status !== 'closed' && task.status !== 'deleted' ? `
-                    <button onclick="setTaskStatus(${task.id}, 'closed')" title="Close">
+                    <button onclick="setTaskStatus(${task.id}, 'closed')" aria-label="Close" data-tooltip="Close">
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <polyline points="20 6 9 17 4 12"/>
                         </svg>
                     </button>
                 ` : ''}
-                <button onclick="createTopicFromTask(${task.id})" title="Create Open Topic">
+                <button onclick="createTopicFromTask(${task.id})" aria-label="Create Open Topic" data-tooltip="Create Open Topic">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
                         <polyline points="14 2 14 8 20 8"/>
@@ -542,7 +561,7 @@ function renderTasks() {
                     </svg>
                 </button>
                 ${task.status !== 'deleted' ? `
-                <button onclick="deleteTask(${task.id})" class="delete" title="Mark Deleted">
+                <button onclick="deleteTask(${task.id})" class="delete" aria-label="Mark Deleted" data-tooltip="Mark Deleted">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <polyline points="3 6 5 6 21 6"/>
                         <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
@@ -1120,7 +1139,27 @@ function escapeAttribute(text) {
 
 // Register service worker
 if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('/sw.js').catch(err => {
-        console.log('SW registration failed:', err);
+    let reloadingForSw = false;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+        if (reloadingForSw) return;
+        reloadingForSw = true;
+        window.location.reload();
     });
+
+    navigator.serviceWorker.register('/sw.js')
+        .then(registration => {
+            registration.update();
+            registration.addEventListener('updatefound', () => {
+                const installing = registration.installing;
+                if (!installing) return;
+                installing.addEventListener('statechange', () => {
+                    if (installing.state === 'installed' && navigator.serviceWorker.controller) {
+                        console.log('New app version available. Reload to update.');
+                    }
+                });
+            });
+        })
+        .catch(err => {
+            console.log('SW registration failed:', err);
+        });
 }

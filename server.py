@@ -186,6 +186,8 @@ def normalize_category_name(value):
         return ''
     # Keep category names file-safe for task header serialization.
     name = re.sub(r'[|()]+', '-', name)
+    # Repair legacy parser artifacts from "||category" headers.
+    name = name.lstrip('-').strip()
     return name
 
 
@@ -442,7 +444,14 @@ def parse_tasks(tasks_file=None):
                 categories_raw = None
                 if len(parts) >= 4:
                     candidate = parts[3].strip()
-                    if is_date(candidate):
+                    # Header format supports an optional due date:
+                    # (status|priority|date|due|categories)
+                    # If due is intentionally blank and categories exist, header looks like:
+                    # (status|priority|date||categories)
+                    if candidate == '':
+                        if len(parts) >= 5:
+                            categories_raw = '|'.join(parts[4:])
+                    elif is_date(candidate):
                         due_date = candidate
                         if len(parts) >= 5:
                             categories_raw = '|'.join(parts[4:])

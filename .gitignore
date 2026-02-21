@@ -12,7 +12,7 @@ recovery/
 
 # Storage config
 storage_config.json
-
+categories.json
 
 # Any markdown files in root (might contain notes) - except README
 /*.md

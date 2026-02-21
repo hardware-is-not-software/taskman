@@ -6,16 +6,22 @@ A lightweight task manager PWA built with Python/Flask and vanilla JavaScript.
 
 - **Task Management**: Create, edit, delete tasks with status and priority
 - **Inline Editing**: Click any task to edit directly (no modal popups)
-- **Status**: Created, Active, Closed
+- **Status**: Created, Active, Due, Closed, Deleted
 - **Priority**: Urgent, Normal, Low
-- **Filtering & Sorting**: Filter by status, sort by date or priority
+- **Filtering & Sorting**:
+  - Filter by status and category chips
+  - Sort by Newest, Oldest, Priority, Status, or Category
+  - Status sort order: Due, Active, Created, Closed, Deleted
+  - Category sort: A-Z, then status order within each category
 - **Open Topics**: Create detailed topic files from tasks
+- **Category Management**: Add, rename, and delete categories (default is protected)
 - **Storage Panel**: Configure local live file paths and recovery destination
 - **Path Browser**: Browse and pick file/folder locations directly from the storage panel
 - **Automatic Cloud Sync Snapshots**: Auto-create protection snapshots before task/topic changes and write them to your configured synced folder
 - **Snapshots & Recovery**: Create snapshots and restore with task-only revert or full recovery
 - **Dark Mode**: Toggle between light and dark themes
 - **PWA Support**: Install as a standalone app on macOS/Windows
+- **Fast Tooltips**: Immediate hover/focus tooltips for action buttons
 - **Text Editor Compatible**: Data stored in human-readable markdown format
 
 ## Quick Start
@@ -61,7 +67,9 @@ Storage locations are configurable in the app:
 │   ├── style.css       # Styling (with dark mode)
 │   ├── app.js          # Frontend logic
 │   ├── manifest.json   # PWA manifest
-│   └── sw.js           # Service worker
+│   ├── sw.js           # Service worker
+│   ├── offline.html    # Offline fallback page
+│   └── icons/          # PWA icons
 ├── tasks/              # Task data (not in repo)
 └── topics/             # Topic files (not in repo)
 ```
@@ -77,6 +85,14 @@ Storage locations are configurable in the app:
 
 - **Chrome/Edge**: Click install icon in address bar
 - **Safari**: Share → Add to Dock
+
+### PWA Troubleshooting (Chrome)
+
+If installability or recent UI updates seem stuck:
+
+1. Open DevTools → Application → Service Workers → **Unregister**
+2. Open DevTools → Application → Storage → **Clear site data**
+3. Hard refresh the page (`Cmd/Ctrl+Shift+R`)
 
 ## License
 

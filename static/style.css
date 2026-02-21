@@ -362,6 +362,7 @@ header h1 {
 /* Filters */
 .filters {
     display: flex;
+    align-items: center;
     gap: 1rem;
     margin-bottom: 1rem;
     flex-wrap: wrap;
@@ -370,6 +371,7 @@ header h1 {
 .filter-group {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 0.5rem;
 }
 
@@ -455,15 +457,52 @@ select:focus {
 }
 
 .category-filter {
-    align-items: flex-start;
+    align-items: center;
 }
 
 .category-filter .btn {
-    margin-top: 0.05rem;
+    margin-top: 0;
 }
 
 .category-filter .category-filters {
     max-width: 320px;
+    align-items: center;
+}
+
+[data-tooltip] {
+    position: relative;
+}
+
+[data-tooltip]:hover::after,
+[data-tooltip]:focus-visible::after {
+    content: attr(data-tooltip);
+    position: absolute;
+    left: 50%;
+    bottom: calc(100% + 6px);
+    transform: translateX(-50%);
+    padding: 0.25rem 0.4rem;
+    border-radius: 4px;
+    background: var(--gray-900);
+    color: var(--gray-50);
+    font-size: 0.7rem;
+    max-width: min(360px, 80vw);
+    white-space: normal;
+    overflow-wrap: anywhere;
+    z-index: 1000;
+    pointer-events: none;
+}
+
+[data-tooltip]:hover::before,
+[data-tooltip]:focus-visible::before {
+    content: '';
+    position: absolute;
+    left: 50%;
+    bottom: 100%;
+    transform: translateX(-50%);
+    border: 5px solid transparent;
+    border-top-color: var(--gray-900);
+    z-index: 1000;
+    pointer-events: none;
 }
 
 .category-manage-list {

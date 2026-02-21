@@ -4,11 +4,15 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="theme-color" content="#2563eb">
+    <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="default">
     <meta name="apple-mobile-web-app-title" content="Tasks">
     <title>Task Manager</title>
     <link rel="manifest" href="/manifest.json">
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+    <link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png">
+    <link rel="icon" type="image/png" sizes="512x512" href="/icons/icon-512.png">
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect fill='%232563eb' width='100' height='100' rx='20'/><path fill='white' d='M25 50 L40 65 L75 30' stroke='white' stroke-width='8' fill='none'/></svg>">
     <link rel="stylesheet" href="/style.css">
 </head>
@@ -17,7 +21,7 @@
         <aside class="storage-panel">
             <div class="storage-panel-header">
                 <h2>File Storage</h2>
-                <button id="btn-storage-toggle" type="button" class="storage-handle" title="Minimize storage panel" aria-label="Minimize storage panel">◀</button>
+                <button id="btn-storage-toggle" type="button" class="storage-handle" data-tooltip="Minimize storage panel" aria-label="Minimize storage panel">◀</button>
             </div>
             <div class="storage-panel-content">
                 <p class="storage-help">Live files stay local. Recovery snapshots are written automatically to your configured folder (for example OneDrive, SharePoint sync folder, or iCloud Drive).</p>
@@ -84,7 +88,7 @@
             <header>
                 <div class="header-left">
                     <h1>Task Manager</h1>
-                    <button id="btn-dark-mode" class="btn-icon" title="Toggle dark mode">
+                    <button id="btn-dark-mode" class="btn-icon" data-tooltip="Toggle dark mode" aria-label="Toggle dark mode">
                         <svg id="icon-sun" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <circle cx="12" cy="12" r="5"/>
                             <line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/>
@@ -120,6 +124,8 @@
                         <option value="date-desc">Newest First</option>
                         <option value="date-asc">Oldest First</option>
                         <option value="priority">Priority</option>
+                        <option value="status">Status</option>
+                        <option value="category-status">Category</option>
                     </select>
                 </div>
             </div>
