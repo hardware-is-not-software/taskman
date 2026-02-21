@@ -583,6 +583,13 @@ function renderTasks() {
             const statusDelta = (STATUS_SORT_ORDER[a.status] ?? 999) - (STATUS_SORT_ORDER[b.status] ?? 999);
             if (statusDelta !== 0) return statusDelta;
             return b.date.localeCompare(a.date);
+        } else if (sort === 'due-date') {
+            const aHas = !!a.due_date;
+            const bHas = !!b.due_date;
+            if (aHas && bHas) return a.due_date.localeCompare(b.due_date);
+            if (aHas) return -1;
+            if (bHas) return 1;
+            return b.date.localeCompare(a.date);
         } else if (sort === 'category-status') {
             const aCategory = getTaskPrimaryCategory(a).toLowerCase();
             const bCategory = getTaskPrimaryCategory(b).toLowerCase();

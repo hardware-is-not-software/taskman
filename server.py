@@ -879,6 +879,13 @@ def list_tasks(
 
 
 @mcp.tool()
+def list_categories() -> dict:
+    """List all available task categories."""
+    categories = load_categories()
+    return {'categories': categories, 'count': len(categories)}
+
+
+@mcp.tool()
 def create_task(
     description: str,
     status: str = 'created',
@@ -893,7 +900,7 @@ def create_task(
         status: Initial status: created, active, closed, deleted. Default: created.
         priority: Priority: urgent, normal, low. Default: normal.
         due_date: Optional due date in YYYY-MM-DD format.
-        category: Optional category name.
+        category: Optional category name. Must be an existing category (use list_categories to see options).
     """
     description = description.strip()
     if not description:
@@ -920,8 +927,7 @@ def create_task(
     categories = load_categories()
     chosen_category = normalize_category_name(category) if category else get_default_category(categories)
     if chosen_category.lower() not in {c.lower() for c in categories}:
-        categories.append(chosen_category)
-        categories = save_categories(categories)
+        raise ValueError(f'Category "{chosen_category}" does not exist. Use list_categories to see available categories.')
 
     tasks = parse_tasks()
     new_task = {
