@@ -139,7 +139,7 @@ function setupEventListeners() {
     });
     
     // Close modal on backdrop click
-    [modalTask, modalTopic, modalTopicEdit, modalCategories, modalMcp].forEach(modal => {
+    [modalTask, modalTopic, modalCategories, modalMcp].forEach(modal => {
         if (!modal) return;
         modal.addEventListener('click', (e) => {
             if (e.target === modal) {
@@ -147,6 +147,15 @@ function setupEventListeners() {
             }
         });
     });
+    // Edit Note modal: don't close on backdrop click when in edit mode
+    if (modalTopicEdit) {
+        modalTopicEdit.addEventListener('click', (e) => {
+            if (e.target !== modalTopicEdit) return;
+            const textarea = document.getElementById('topic-edit-content');
+            if (textarea && !textarea.readOnly) return; // edit mode: ignore backdrop click
+            modalTopicEdit.classList.add('hidden');
+        });
+    }
     
     // Task form submit
     formTask.addEventListener('submit', handleTaskSubmit);
@@ -1054,7 +1063,10 @@ async function openTopicViewer(filename) {
 
 async function handleTopicEditSubmit(e) {
     e.preventDefault();
+    await saveTopicEditAndClose();
+}
 
+async function saveTopicEditAndClose() {
     const filename = document.getElementById('topic-edit-filename').value;
     const content = document.getElementById('topic-edit-content').value;
     if (!filename) return;
