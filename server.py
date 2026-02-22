@@ -19,6 +19,14 @@ from mcp.server.fastmcp import FastMCP
 
 app = Flask(__name__, static_folder='static', static_url_path='')
 
+ALLOWED_HOSTS = {'localhost', '127.0.0.1', 'localhost:5050', '127.0.0.1:5050'}
+
+@app.before_request
+def block_dns_rebinding():
+    host = request.host.lower()
+    if host not in ALLOWED_HOSTS:
+        return 'Forbidden', 403
+
 # Paths
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_TASKS_FILE = os.path.join(BASE_DIR, 'tasks', 'tasks.md')
