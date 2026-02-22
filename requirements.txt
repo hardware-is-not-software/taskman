@@ -1,2 +1,3 @@
 # Task Manager Dependencies
 flask>=2.0
+mcp>=1.0

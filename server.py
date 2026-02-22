@@ -45,7 +45,7 @@ LEGACY_PATTERN = re.compile(r'^\((\w+)\)\s+(.+)$')
 # FastMCP instance — serves MCP streamable-HTTP transport on MCP_PORT
 mcp = FastMCP(
     MCP_SERVER_NAME,
-    host='0.0.0.0',
+    host='127.0.0.1',
     port=MCP_PORT,
 )
 
@@ -1525,4 +1525,4 @@ if __name__ == '__main__':
     )
     mcp_thread.start()
 
-    app.run(host='0.0.0.0', port=5050, debug=False, use_reloader=False)
+    app.run(host='127.0.0.1', port=5050, debug=False, use_reloader=False)
