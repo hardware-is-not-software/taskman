@@ -1,4 +1,0 @@
-interface:
-  display_name: "Taskman Usage"
-  short_description: "Set up, launch, view, and use Taskman MCP"
-  default_prompt: "Use $taskman-usage to set up the environment, launch Taskman, view tasks and notes, and use MCP tools safely."

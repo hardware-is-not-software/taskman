@@ -52,6 +52,8 @@ Exposed MCP tools are intentionally restricted to task-safe operations only:
 - `taskman.set_task_status` (change task status)
 - `taskman.close_task` (close task; optional closing_remarks)
 - `taskman.create_note` (create a note in the notes folder)
+- `taskman.search_notes` (search notes by query; matches filename and content)
+- `taskman.get_note` (get full content of a note by filename)
 
 Not exposed via MCP:
 

@@ -1020,6 +1020,148 @@ def create_note(
     return {'note': topic}
 
 
+def _list_notes_internal():
+    """List all notes from the configured topics directory (no Flask dependency)."""
+    config = load_storage_config()
+    topics_dir = config['topics_dir']
+    topics = []
+    if os.path.exists(topics_dir):
+        for filename in os.listdir(topics_dir):
+            if filename.endswith('.md') and not filename.startswith('.'):
+                filepath = os.path.join(topics_dir, filename)
+                date_match = re.match(r'(\d{4}_\d{1,2}_\d{1,2})_(.+)\.md', filename)
+                if date_match:
+                    date_str, name = date_match.groups()
+                    topic_date = date_str.replace('_', '-')
+                else:
+                    stat = os.stat(filepath)
+                    topic_date = datetime.fromtimestamp(stat.st_mtime).strftime('%Y-%m-%d')
+                    name = os.path.splitext(filename)[0]
+                topics.append({
+                    'filename': filename,
+                    'name': name,
+                    'date': topic_date,
+                    'path': filepath,
+                })
+    topics.sort(key=lambda x: x['date'], reverse=True)
+    return topics
+
+
+@mcp.tool()
+def search_notes(
+    query: str,
+    limit: int = 50,
+) -> dict:
+    """Search notes by filename/name or content.
+
+    Args:
+        query: Search string (case-insensitive). Matches note filenames and file contents.
+        limit: Max notes to return (1-100, default 50).
+
+    Returns matching notes with filename, name, date, and optionally a content snippet where the query was found.
+    """
+    query = query.strip()
+    if not query:
+        return {'notes': [], 'count': 0}
+
+    limit = max(1, min(100, limit))
+    config = load_storage_config()
+    topics_dir = config['topics_dir']
+    query_lower = query.lower()
+    results = []
+
+    if not os.path.exists(topics_dir):
+        return {'notes': [], 'count': 0}
+
+    for filename in os.listdir(topics_dir):
+        if not filename.endswith('.md') or filename.startswith('.'):
+            continue
+        filepath = os.path.join(topics_dir, filename)
+        if not os.path.isfile(filepath):
+            continue
+
+        date_match = re.match(r'(\d{4}_\d{1,2}_\d{1,2})_(.+)\.md', filename)
+        if date_match:
+            date_str, name = date_match.groups()
+            topic_date = date_str.replace('_', '-')
+        else:
+            stat = os.stat(filepath)
+            topic_date = datetime.fromtimestamp(stat.st_mtime).strftime('%Y-%m-%d')
+            name = os.path.splitext(filename)[0]
+
+        match_in_name = query_lower in name.lower() or query_lower in filename.lower()
+        snippet = None
+
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                content = f.read()
+        except OSError:
+            content = ''
+
+        match_in_content = query_lower in content.lower()
+        if match_in_content:
+            lines = content.splitlines()
+            for i, line in enumerate(lines):
+                if query_lower in line.lower():
+                    snippet = line.strip()[:200]
+                    if len(line.strip()) > 200:
+                        snippet += '...'
+                    break
+
+        if match_in_name or match_in_content:
+            results.append({
+                'filename': filename,
+                'name': name,
+                'date': topic_date,
+                'snippet': snippet,
+            })
+
+    results = results[:limit]
+    return {'notes': results, 'count': len(results)}
+
+
+@mcp.tool()
+def get_note(filename: str) -> dict:
+    """Get the full content of a note by filename.
+
+    Args:
+        filename: The note filename (e.g. 2026_2_22_AI_levels.md). Use search_notes to find filenames.
+    """
+    filename = filename.strip()
+    if not filename:
+        raise ValueError('filename is required')
+    if not filename.endswith('.md'):
+        filename = f'{filename}.md'
+
+    config = load_storage_config()
+    try:
+        filepath = resolve_topic_path(filename, config['topics_dir'])
+    except ValueError as exc:
+        raise ValueError(f'Invalid note path: {exc}') from exc
+
+    if not os.path.exists(filepath):
+        raise FileNotFoundError('Note not found')
+
+    with open(filepath, 'r', encoding='utf-8') as f:
+        content = f.read()
+
+    date_match = re.match(r'(\d{4}_\d{1,2}_\d{1,2})_(.+)\.md', filename)
+    if date_match:
+        date_str, name = date_match.groups()
+        topic_date = date_str.replace('_', '-')
+    else:
+        stat = os.stat(filepath)
+        topic_date = datetime.fromtimestamp(stat.st_mtime).strftime('%Y-%m-%d')
+        name = os.path.splitext(filename)[0]
+
+    return {
+        'filename': filename,
+        'name': name,
+        'date': topic_date,
+        'content': content,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Flask web UI routes
 # ---------------------------------------------------------------------------
@@ -1305,29 +1447,7 @@ def delete_task(task_id):
 
 @app.route('/api/topics', methods=['GET'])
 def get_topics():
-    config = load_storage_config()
-    topics_dir = config['topics_dir']
-    topics = []
-    if os.path.exists(topics_dir):
-        for filename in os.listdir(topics_dir):
-            if filename.endswith('.md') and not filename.startswith('.'):
-                filepath = os.path.join(topics_dir, filename)
-                date_match = re.match(r'(\d{4}_\d{1,2}_\d{1,2})_(.+)\.md', filename)
-                if date_match:
-                    date_str, name = date_match.groups()
-                    topic_date = date_str.replace('_', '-')
-                else:
-                    stat = os.stat(filepath)
-                    topic_date = datetime.fromtimestamp(stat.st_mtime).strftime('%Y-%m-%d')
-                    name = os.path.splitext(filename)[0]
-                topics.append({
-                    'filename': filename,
-                    'name': name,
-                    'date': topic_date,
-                    'path': filepath
-                })
-
-    topics.sort(key=lambda x: x['date'], reverse=True)
+    topics = _list_notes_internal()
     return jsonify(topics)
 
 
